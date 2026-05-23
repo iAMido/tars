@@ -8,7 +8,7 @@
 
 | Decision | Choice | Why |
 |---|---|---|
-| **Production host** | Hetzner CX23 (~€3.79/mo, 2 vCPU / 4GB / 40GB NVMe, Falkenstein or Helsinki) | Cheapest serious VPS; native filesystem; systemd; no PaaS opinions to fight |
+| **Production host** | Hetzner CX23 Intel/AMD, **NBG-1 Nuremberg**, **IPv6-only** (€3.99/mo, 2 vCPU / 4GB / 40GB NVMe, 20TB traffic) | Cheapest serious x86 VPS; native filesystem; systemd; no PaaS opinions to fight. IPv6-only is fine because Tailscale handles all ingress. |
 | **Dev host** | This Windows 11 machine, Python 3.12 via `uv` | Same code path; deploy to VPS once V1 works |
 | **Voice (ElevenLabs)** | **Deferred to v1.1** | Saves $22/mo while iterating; removes the biggest tuning rabbit hole from V1 |
 | **Storage** | SQLite + WAL + FTS5 + sqlite-vec, single file | One file, one backup, lock-free coordination via shared event loop |
@@ -20,7 +20,15 @@
 | **Editor mirror** | Syncthing → Obsidian sub-folder | Standard, free, conflict-tolerant |
 | **Backups** | Local snapshot + restic→B2 + restic→Hetzner Storage Box | Three destinations, deduplicated |
 
-**Still TBD (will ask in Phase 0):** Telegram account + bot token, Tailscale install, Hetzner account, Voyage account, B2 + Storage Box accounts, timezone.
+**Timezone:** `Asia/Jerusalem` (the 05:00 morning briefing fires at 05:00 Israel time; APScheduler handles DST automatically via `zoneinfo`).
+
+**Backup destinations (locked):**
+- **Dest 1:** Backblaze B2 (~$0.50/mo at TARS data volume)
+- **Dest 2:** Hetzner Storage Box BX11 (€3.49/mo, 1TB, SFTP) — provisioned under a **separate Hetzner account** with a different payment method, so a billing/account lockout on the VPS account doesn't take both VPS and backup-2 down at once
+
+**Fixed monthly cost before any LLM/voice usage:** €3.99 VPS + €3.49 Storage Box + ~$0.50 B2 ≈ **€8/mo**.
+
+**Still TBD (will ask in Phase 0):** Telegram bot token, Hetzner accounts (×2), Voyage account, B2 + Storage Box credentials, Tailscale install on VPS.
 
 ---
 
@@ -63,7 +71,8 @@ Open in parallel, before any code:
 
 | Service | Cost | Purpose | Output to capture |
 |---|---|---|---|
-| Hetzner Cloud | €4/mo | VPS host | API token + project |
+| Hetzner Cloud (acct 1) | €3.99/mo | VPS host (CX23, NBG-1, IPv6-only) | API token + project |
+| Hetzner Cloud (acct 2) | €3.49/mo | Storage Box BX11 for backup dest 2 | SFTP host + SSH key (separate from VPS root key) |
 | Telegram BotFather | Free | Bot token + chat ID | Bot token, your numeric chat ID (via `@userinfobot`) |
 | OpenRouter | Existing | Primary LLM | API key, $5+ credit |
 | OpenAI Platform | Existing | Fallback LLM | API key, $5+ credit |
@@ -71,10 +80,9 @@ Open in parallel, before any code:
 | Google Cloud Console | Existing | Gmail + Calendar OAuth | `client_secret.json` (Desktop app), then `token.json` after first auth |
 | Tailscale | Free Personal | Dashboard ingress | Tailnet up; `tailscale ip -4` available on VPS |
 | Backblaze B2 | ~$0.50/mo | Backup destination 1 | `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`, bucket name |
-| Hetzner Storage Box (BX11) | €3.49/mo | Backup destination 2 | SFTP host + key (separate from VPS root key) |
 | Syncthing | Free | Vault mirror to Obsidian | Device IDs on VPS and desktop, folder ID |
 
-Total fixed cost before any LLM/voice usage: **~€8/mo** (VPS + Storage Box + B2).
+Total fixed cost before any LLM/voice usage: **~€8/mo** (€3.99 VPS + €3.49 Storage Box + ~$0.50 B2).
 
 ---
 
@@ -468,7 +476,7 @@ CREATE INDEX idx_cal_start ON cal_events(start_ts);
 
 | Bucket | Expected | Hard cap (alert) |
 |---|---|---|
-| Hetzner CX23 + Storage Box | €7.30/mo | n/a (fixed) |
+| Hetzner CX23 (IPv6-only) + Storage Box BX11 | €7.48/mo | n/a (fixed) |
 | Backblaze B2 (~5GB after 6 months) | $0.50/mo | n/a (fixed) |
 | OpenRouter cron (DeepSeek V3.2, ~5M tokens/mo) | $2-3 | `daily_cap_usd=5` in router |
 | OpenRouter interactive (gpt-5-mini, ~1M tokens/mo) | $1-2 | included in cap |
