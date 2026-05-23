@@ -1,0 +1,52 @@
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- uv ---
+.uv-cache/
+
+# --- TARS local state ---
+*.db
+*.db-wal
+*.db-shm
+vault/
+backups/
+snapshots/
+logs/
+*.log
+
+# --- Secrets & config ---
+.env
+.env.*
+!.env.example
+**/secrets*.toml
+**/secrets*.yaml
+.tars/
+config.local.toml
+token.json
+google_token.json
+client_secret*.json
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Node (if any tooling sneaks in) ---
+node_modules/
+npm-debug.log*
