@@ -38,6 +38,15 @@ token.json
 google_token.json
 client_secret*.json
 
+# --- Personal notes / scratch (NEVER commit these) ---
+stuff.txt
+notes.txt
+todo.txt
+scratch/
+*.note
+*passphrase*
+*secret*
+
 # --- Editor / OS ---
 .vscode/
 .idea/
