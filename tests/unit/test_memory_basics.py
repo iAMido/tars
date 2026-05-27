@@ -10,26 +10,31 @@ from __future__ import annotations
 
 import struct
 
-from tars.memory.embed import EMBED_DIM, pack_int8
+from tars.memory.embed import EMBED_DIM, pack_float32
 from tars.memory.search import RRF_K, _fts5_escape
 
 
-def test_pack_int8_roundtrip() -> None:
-    vec = [-128, -1, 0, 1, 127] + [0] * (EMBED_DIM - 5)
-    packed = pack_int8(vec)
-    assert len(packed) == EMBED_DIM  # int8 = 1 byte per element
+def test_pack_float32_roundtrip() -> None:
+    """float32 is 4 bytes per element. 1024-dim -> 4096 bytes."""
+    vec = [-1.0, -0.5, 0.0, 0.5, 1.0] + [0.0] * (EMBED_DIM - 5)
+    packed = pack_float32(vec)
+    assert len(packed) == EMBED_DIM * 4
 
     # Unpack and confirm bit-exact round-trip.
-    unpacked = list(struct.unpack(f"{EMBED_DIM}b", packed))
-    assert unpacked == vec
+    unpacked = list(struct.unpack(f"{EMBED_DIM}f", packed))
+    # float32 isn't infinitely precise; allow tiny epsilon.
+    for orig, got in zip(vec, unpacked, strict=True):
+        assert abs(orig - got) < 1e-6
 
 
-def test_pack_int8_signed_range() -> None:
-    """sqlite-vec int8 columns expect signed bytes (-128..127), not unsigned."""
-    # 200 in unsigned would be 200; in signed it's -56. We must use 'b' not 'B'.
-    vec = [200 if False else -56]   # the value Voyage would produce
-    packed = pack_int8(vec)
-    assert packed == bytes([0xC8])   # 0xC8 = 200 unsigned = -56 signed
+def test_pack_float32_handles_typical_voyage_range() -> None:
+    """Voyage typically returns values in roughly [-0.2, 0.2] range."""
+    vec = [0.123, -0.456, 0.0001, -0.9999] + [0.0] * (EMBED_DIM - 4)
+    packed = pack_float32(vec)
+    assert len(packed) == EMBED_DIM * 4
+    unpacked = list(struct.unpack(f"{EMBED_DIM}f", packed))
+    for orig, got in zip(vec, unpacked, strict=True):
+        assert abs(orig - got) < 1e-6
 
 
 def test_fts5_escape_strips_specials() -> None:

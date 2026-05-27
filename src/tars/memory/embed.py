@@ -23,16 +23,26 @@ log = logging.getLogger("tars.memory.embed")
 EMBED_MODEL = "voyage-3-large"
 RERANK_MODEL = "rerank-2.5"
 EMBED_DIM = 1024
-EMBED_DTYPE = "int8"  # signed int8 in [-128, 127]; 1024 bytes per vector.
+
+# We requested int8 in early development but voyageai 0.3.7 returns float32
+# regardless of output_dtype — and sqlite-vec is strict about the column-type
+# byte layout. Float32 is the well-trodden sqlite-vec path; the 4x storage
+# overhead vs int8 is irrelevant at <100K docs (~400MB worst case).
+EMBED_DTYPE = "float"
 
 # Batch caps recommended by Voyage to keep request bodies under 1MB.
 EMBED_MAX_BATCH = 32
 
 
-def pack_int8(vec: Sequence[int]) -> bytes:
-    """Pack a sequence of int8 ints into the byte layout sqlite-vec expects
-    for a vec0 column declared as int8[N]."""
-    return struct.pack(f"{len(vec)}b", *vec)
+def pack_float32(vec: Sequence[float]) -> bytes:
+    """Pack a sequence of floats into the byte layout sqlite-vec expects
+    for a vec0 column declared as float[N] (which is float32 little-endian)."""
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+# Back-compat alias so other modules that imported pack_int8 don't break.
+# The function returns float32 bytes now; callers don't care about the encoding.
+pack_int8 = pack_float32
 
 
 class Embedder:
