@@ -34,6 +34,9 @@ class Agent:
     def __init__(self, db: Database, cfg) -> None:
         self.db = db
         self.cfg = cfg
+        # Tools (run_tool) discover cfg via this side-channel so we don't
+        # have to thread cfg through every call signature.
+        db._cfg = cfg  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # Persistence

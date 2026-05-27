@@ -114,10 +114,13 @@ class Database:
 
         # Programmatic vec0 table — depends on sqlite-vec being loaded.
         # Idempotent (IF NOT EXISTS), so safe to re-run.
+        # int8[1024] matches voyage-3-large's int8 output: 1024 bytes per vector
+        # instead of 4096 with float32. ~4x storage win for the price of slightly
+        # lower precision (irrelevant for retrieval-by-cosine at this scale).
         await self.conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_docs USING vec0("
             f" doc_id INTEGER PRIMARY KEY,"
-            f" embedding FLOAT[{VEC_EMBEDDING_DIM}]"
+            f" embedding int8[{VEC_EMBEDDING_DIM}]"
             f")"
         )
         await self.conn.commit()

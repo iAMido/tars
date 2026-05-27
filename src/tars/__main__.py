@@ -89,14 +89,36 @@ async def _cmd_chat(text: str, tier: str, thread: str) -> int:
         await db.close()
 
 
+async def _cmd_reindex() -> int:
+    """Phase 4: full reindex of brain_docs + vec_docs."""
+    from tars.memory.embed import Embedder
+    from tars.memory.index import reindex_brain_docs
+
+    log.info("TARS %s reindex", __version__)
+    cfg = load_config()
+    db = await Database.connect(cfg.paths.db)
+    try:
+        await db.migrate()
+        embedder = Embedder(api_key=cfg.voyage.api_key)
+        summary = await reindex_brain_docs(db, embedder)
+        log.info("reindex summary: %s", summary)
+        return 0
+    finally:
+        await db.close()
+
+
 async def _cmd_bot() -> int:
     """Phase 3: long-running Telegram bot (long polling).
 
-    Ctrl+C stops cleanly. SIGTERM (systemd) does the same."""
+    Ctrl+C stops cleanly. SIGTERM (systemd) does the same.
+    Phase 4 addition: reindex brain_docs once at startup so search_memory
+    works against current data."""
     import signal
 
     from tars.agent import Agent
     from tars.bot.handlers import run_bot
+    from tars.memory.embed import Embedder
+    from tars.memory.index import reindex_brain_docs
 
     log.info("TARS %s bot", __version__)
     cfg = load_config()
@@ -109,6 +131,13 @@ async def _cmd_bot() -> int:
     try:
         await db.migrate()
         agent = Agent(db=db, cfg=cfg)
+
+        # One-shot reindex on startup. Phase 6 will move this to APScheduler.
+        try:
+            summary = await reindex_brain_docs(db, Embedder(api_key=cfg.voyage.api_key))
+            log.info("startup reindex: %s", summary)
+        except Exception as e:  # noqa: BLE001
+            log.exception("startup reindex failed (%s); search_memory will still work but may be stale", e)
 
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
@@ -153,6 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pchat.add_argument("--thread", default="cli:smoke", help="Thread key (default: cli:smoke).")
 
     sub.add_parser("bot", help="Run the Telegram bot (long polling). Ctrl+C to stop.")
+    sub.add_parser("reindex", help="Rebuild FTS5 + vec0 indices from notes/messages/briefings.")
 
     return p
 
@@ -165,6 +195,8 @@ def main() -> int:
         return asyncio.run(_cmd_chat(args.text, args.tier, args.thread))
     if args.cmd == "bot":
         return asyncio.run(_cmd_bot())
+    if args.cmd == "reindex":
+        return asyncio.run(_cmd_reindex())
     return 1
 
 
