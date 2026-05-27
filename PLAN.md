@@ -4,6 +4,17 @@
 
 ---
 
+## Progress log
+
+- **Phase 0–4 complete (local Windows dev)** — schema, config loader, LLM router with caps + cooldowns, Telegram bot via aiogram, hybrid memory search (FTS5 + vec0 + RRF + Voyage rerank). 31 unit tests green.
+- **Phase 9a complete (deploy)** — TARS now running 24/7 on Hetzner CPX22 Nuremberg under systemd (`tars.service`), polling Telegram from the tailnet, memory retrieval verified live. €11/mo all-in.
+- Stuck on int8 vec_docs schema mismatch: voyageai 0.3.7 returns float32 regardless of `output_dtype="int8"`. Switched to `float[1024]`, lost the 4× space savings but unblocked indexing. Documented in commit 892a237.
+- Known polish item: TARS voice still too chatty (adds "Confirm if that's changed…" tails). Sharpen system prompt later.
+
+Remaining for V1: Phase 5 (entity store + follow-ups), Phase 6 (APScheduler + morning briefing), Phase 7 (Gmail/Cal OAuth), Phase 8 (dashboard), Phase 9b (restic backups), Phase 10 (polish).
+
+---
+
 ## 0. Locked decisions (from the planning conversation)
 
 | Decision | Choice | Why |
