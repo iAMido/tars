@@ -14,7 +14,8 @@
       "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from tars.prompt import ANCHOR_HASH; print\\(ANCHOR_HASH\\)\")",
       "Bash(uv add *)",
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 2: frozen prompt, LLM router with caps+cooldowns, Agent class, tool loop *)",
-      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 3: Telegram bot \\(aiogram 3\\) + history bug fix + /clear command *)"
+      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 3: Telegram bot \\(aiogram 3\\) + history bug fix + /clear command *)",
+      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Default web_research tier to gpt-5:online \\(OpenRouter auto-RAG\\) *)"
     ]
   }
 }

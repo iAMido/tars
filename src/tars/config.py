@@ -51,7 +51,10 @@ class TiersConfig(BaseModel):
     interactive_fast: str = "openai/gpt-5-mini"
     cron_default: str = "deepseek/deepseek-v3.2"
     ingest: str = "deepseek/deepseek-v3.2"
-    web_research: str = "openai/gpt-5"
+    # The :online suffix enables OpenRouter's web-search plugin (Perplexity-style
+    # auto-RAG). Costs ~$5 per 1000 searches in addition to model tokens.
+    # /research is the only tier that uses this — interactive chat stays cheap.
+    web_research: str = "openai/gpt-5:online"
 
 
 class Config(BaseModel):
