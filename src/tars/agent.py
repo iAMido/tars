@@ -50,22 +50,22 @@ class Agent:
             )
 
     async def _load_history(self, thread_key: str, limit: int = HISTORY_LIMIT) -> list[dict]:
+        """Load prior turns for context.
+
+        Only user + final-assistant turns are loaded. Intermediate assistant-
+        with-tool-calls turns and tool-role responses are intra-turn implementation
+        details — replaying them across invocations would require persisting
+        tool_call_id linkages, and any drift between them produces a 400 from
+        OpenAI's strict tool-call validation. Skip them entirely.
+        """
         rows = await self.db.fetch_all(
-            "SELECT role, content, tool_calls FROM messages "
-            "WHERE thread_key = ? ORDER BY id DESC LIMIT ?",
+            "SELECT role, content FROM messages "
+            "WHERE thread_key = ? AND role IN ('user','assistant') AND tool_calls IS NULL "
+            "ORDER BY id DESC LIMIT ?",
             (thread_key, limit),
         )
-        out: list[dict] = []
         # rows are reverse-chronological; flip them.
-        for r in reversed(list(rows)):
-            msg: dict[str, Any] = {"role": r["role"], "content": r["content"]}
-            if r["tool_calls"]:
-                try:
-                    msg["tool_calls"] = json.loads(r["tool_calls"])
-                except json.JSONDecodeError:
-                    pass
-            out.append(msg)
-        return out
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(list(rows))]
 
     async def _save_turn(
         self,
@@ -140,22 +140,17 @@ class Agent:
             )
 
             if resp.tool_calls:
-                # Append the assistant's tool-call message, then run each tool.
+                # In-flight tool calls only live inside `messages` for this
+                # invocation. We do NOT persist intermediate assistant-with-
+                # tool-calls or tool-role turns to the messages table — they're
+                # implementation details, and re-loading them across calls
+                # leads to orphaned-tool_call validation errors.
                 messages.append(
                     {
                         "role": "assistant",
                         "content": resp.text or "",
                         "tool_calls": resp.tool_calls,
                     }
-                )
-                await self._save_turn(
-                    thread_key,
-                    "assistant",
-                    resp.text or "",
-                    tool_calls=resp.tool_calls,
-                    model=resp.model,
-                    cost=resp.cost_usd,
-                    tier=tier,
                 )
                 for tc in resp.tool_calls:
                     name = (tc.get("function") or {}).get("name") or ""
@@ -169,7 +164,6 @@ class Agent:
                             "content": result,
                         }
                     )
-                    await self._save_turn(thread_key, "tool", result)
                 continue  # loop back into the LLM with tool results in context
 
             # No tool calls: this is the final assistant turn.

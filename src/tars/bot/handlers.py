@@ -1,0 +1,231 @@
+"""Telegram bot — aiogram 3 dispatcher.
+
+Handlers:
+  /start           : presence ping
+  /whoami          : prints chat_id (works even for unauthorized users — debug)
+  /voice on|off    : voice toggle (placeholder — real voice in V1.1)
+  /research <q>    : Agent.chat at web_research tier
+  /tier            : prints current tier defaults
+  note: <body>     : direct save_note, no LLM call (cheap, instant)
+  <free text>      : Agent.chat at interactive_fast tier
+
+Authorization:
+  All handlers except /whoami are gated by an aiogram BaseFilter on
+  cfg.telegram.allowed_chat_ids. Unauthorized messages get dropped silently.
+  /whoami responds to anyone so you can recover if Telegram swaps your chat_id.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ChatAction
+from aiogram.filters import BaseFilter, Command, CommandStart
+from aiogram.types import Message
+
+from tars.agent import Agent
+from tars.config import Config
+from tars.tools import save_note as tool_save_note
+
+log = logging.getLogger("tars.bot")
+
+TELEGRAM_MSG_LIMIT = 4000  # actual limit is 4096; leave headroom for prefixes
+
+
+# ---------------------------------------------------------------------------
+# Authorization filter
+# ---------------------------------------------------------------------------
+
+
+class AuthFilter(BaseFilter):
+    """Drop messages from chat_ids not in the allowlist."""
+
+    def __init__(self, allowed: list[int]) -> None:
+        self.allowed: set[int] = set(allowed)
+
+    async def __call__(self, m: Message) -> bool:
+        ok = m.chat.id in self.allowed
+        if not ok:
+            log.warning(
+                "Dropped message from unauthorized chat_id=%s text=%r",
+                m.chat.id,
+                (m.text or "")[:50],
+            )
+        return ok
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _send_long(bot: Bot, chat_id: int, text: str) -> None:
+    """Send long text in chunks under Telegram's 4096-char per-message limit."""
+    if not text:
+        text = "(empty response)"
+    while text:
+        chunk, text = text[:TELEGRAM_MSG_LIMIT], text[TELEGRAM_MSG_LIMIT:]
+        await bot.send_message(chat_id, chunk)
+
+
+async def _typing_until(bot: Bot, chat_id: int, stop: asyncio.Event) -> None:
+    """Show 'typing...' until the stop event is set. Telegram resets the
+    indicator every ~5s, so we refresh every 4s while a slow LLM call runs."""
+    try:
+        while not stop.is_set():
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                continue
+    except Exception:  # noqa: BLE001
+        # never let the typing task crash the handler
+        log.exception("typing-indicator task crashed")
+
+
+async def _with_typing(bot: Bot, chat_id: int, coro):
+    """Run an awaitable while keeping the 'typing...' indicator alive."""
+    stop = asyncio.Event()
+    typing_task = asyncio.create_task(_typing_until(bot, chat_id, stop))
+    try:
+        return await coro
+    finally:
+        stop.set()
+        await asyncio.gather(typing_task, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher builder
+# ---------------------------------------------------------------------------
+
+
+def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
+    bot = Bot(token=cfg.telegram.bot_token)
+    dp = Dispatcher()
+
+    # /whoami is special — it responds to ANYONE so you can recover your
+    # chat_id if Telegram ever changes it on you. Register it BEFORE the
+    # auth filter is applied.
+    whoami_router = dp
+
+    @whoami_router.message(Command("whoami"))
+    async def _whoami(m: Message) -> None:
+        await m.answer(
+            f"chat_id: <code>{m.chat.id}</code>\n"
+            f"user_id: <code>{m.from_user.id if m.from_user else 'n/a'}</code>\n"
+            f"username: @{m.from_user.username if m.from_user else 'n/a'}",
+            parse_mode="HTML",
+        )
+
+    # Everything below this is auth-gated.
+    auth = AuthFilter(cfg.telegram.allowed_chat_ids)
+
+    @dp.message(CommandStart(), auth)
+    async def _start(m: Message) -> None:
+        await m.answer("TARS online.")
+
+    @dp.message(Command("voice"), auth)
+    async def _voice_toggle(m: Message) -> None:
+        # V1.1 will wire this to a per-thread setting; for now it's stub.
+        await m.answer("Voice control is queued for V1.1. Text-only for now.")
+
+    @dp.message(Command("clear"), auth)
+    async def _clear(m: Message) -> None:
+        """Wipe conversation history for this chat (but keep notes, follow-ups, ledger)."""
+        thread_key = f"tg:{m.chat.id}"
+        await agent.db.execute(
+            "DELETE FROM messages WHERE thread_key = ?", (thread_key,)
+        )
+        await m.answer("Conversation cleared. Notes and follow-ups preserved.")
+
+    @dp.message(Command("tier"), auth)
+    async def _tier_info(m: Message) -> None:
+        t = cfg.tiers
+        await m.answer(
+            "Current tier mapping:\n"
+            f"  interactive_fast = {t.interactive_fast}\n"
+            f"  cron_default     = {t.cron_default}\n"
+            f"  ingest           = {t.ingest}\n"
+            f"  web_research     = {t.web_research}"
+        )
+
+    @dp.message(Command("research"), auth)
+    async def _research(m: Message) -> None:
+        text = (m.text or "").removeprefix("/research").strip()
+        if not text:
+            await m.answer("Usage: /research <question>")
+            return
+        thread_key = f"tg:{m.chat.id}"
+        try:
+            out = await _with_typing(
+                bot,
+                m.chat.id,
+                agent.chat(thread_key=thread_key, user_text=text, tier="web_research"),
+            )
+            await _send_long(bot, m.chat.id, out["text"])
+        except Exception as e:  # noqa: BLE001
+            log.exception("research failed")
+            await m.answer(f"Research failed: {e}")
+
+    @dp.message(F.text.regexp(r"(?is)^\s*note\s*:\s*(.+)"), auth)
+    async def _take_note(m: Message) -> None:
+        # Direct save_note — no LLM, no cost.
+        body = (m.text or "").split(":", 1)[1].strip()
+        if not body:
+            await m.answer("Empty note. Try: note: bought milk")
+            return
+        result = await tool_save_note(agent.db, {"body": body, "tags": ["telegram"]})
+        try:
+            payload = json.loads(result)
+        except json.JSONDecodeError:
+            payload = {}
+        note_id = payload.get("note_id")
+        if note_id:
+            await m.answer(f"Noted. [note:{note_id}]")
+        else:
+            await m.answer(f"Note save error: {result}")
+
+    @dp.message(F.text, auth)
+    async def _free_chat(m: Message) -> None:
+        thread_key = f"tg:{m.chat.id}"
+        try:
+            out = await _with_typing(
+                bot,
+                m.chat.id,
+                agent.chat(thread_key=thread_key, user_text=m.text or "", tier="interactive_fast"),
+            )
+            await _send_long(bot, m.chat.id, out["text"])
+            log.info(
+                "tg chat done chat_id=%s tokens=%d/%d cached=%d cost=$%.6f steps=%d model=%s",
+                m.chat.id,
+                0,  # not exposing per-call tokens in this hot path (see cost_ledger)
+                0,
+                out["cached_tokens"],
+                out["cost_usd"],
+                out["steps"],
+                out["model"],
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("free chat failed")
+            await m.answer(f"Failed: {e}")
+
+    return dp, bot
+
+
+# ---------------------------------------------------------------------------
+# Long-running entry point — used by `python -m tars bot`.
+# ---------------------------------------------------------------------------
+
+
+async def run_bot(agent: Agent, cfg: Config) -> None:
+    dp, bot = build_dispatcher(agent, cfg)
+    log.info("Bot starting (long polling). Allowed chat_ids=%s", cfg.telegram.allowed_chat_ids)
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await bot.session.close()
+        log.info("Bot stopped.")

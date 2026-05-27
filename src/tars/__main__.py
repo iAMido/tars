@@ -89,6 +89,54 @@ async def _cmd_chat(text: str, tier: str, thread: str) -> int:
         await db.close()
 
 
+async def _cmd_bot() -> int:
+    """Phase 3: long-running Telegram bot (long polling).
+
+    Ctrl+C stops cleanly. SIGTERM (systemd) does the same."""
+    import signal
+
+    from tars.agent import Agent
+    from tars.bot.handlers import run_bot
+
+    log.info("TARS %s bot", __version__)
+    cfg = load_config()
+    if not cfg.telegram.allowed_chat_ids:
+        log.warning(
+            "telegram.allowed_chat_ids is EMPTY. Nobody can talk to the bot "
+            "except via /whoami. Add your chat_id to ~/.tars/config.toml."
+        )
+    db = await Database.connect(cfg.paths.db)
+    try:
+        await db.migrate()
+        agent = Agent(db=db, cfg=cfg)
+
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        try:
+            loop.add_signal_handler(signal.SIGINT, stop.set)
+            loop.add_signal_handler(signal.SIGTERM, stop.set)
+        except NotImplementedError:
+            # add_signal_handler is unimplemented on Windows; KeyboardInterrupt
+            # still cancels the task, which is fine for dev.
+            pass
+
+        bot_task = asyncio.create_task(run_bot(agent, cfg))
+        stop_task = asyncio.create_task(stop.wait())
+        done, pending = await asyncio.wait(
+            {bot_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        for t in done:
+            exc = t.exception()
+            if exc and not isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+                log.exception("Bot task crashed", exc_info=exc)
+                return 1
+        return 0
+    finally:
+        await db.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tars")
     sub = p.add_subparsers(dest="cmd")
@@ -104,6 +152,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pchat.add_argument("--thread", default="cli:smoke", help="Thread key (default: cli:smoke).")
 
+    sub.add_parser("bot", help="Run the Telegram bot (long polling). Ctrl+C to stop.")
+
     return p
 
 
@@ -113,6 +163,8 @@ def main() -> int:
         return asyncio.run(_cmd_check())
     if args.cmd == "chat":
         return asyncio.run(_cmd_chat(args.text, args.tier, args.thread))
+    if args.cmd == "bot":
+        return asyncio.run(_cmd_bot())
     return 1
 
 
