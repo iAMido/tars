@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "structlog>=24.4",
     "voyageai>=0.3",
+    "numpy>=1.26",  # voyageai imports numpy at runtime but doesn't always declare it
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
     "feedparser>=6.0",
