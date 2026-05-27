@@ -16,7 +16,8 @@
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 2: frozen prompt, LLM router with caps+cooldowns, Agent class, tool loop *)",
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 3: Telegram bot \\(aiogram 3\\) + history bug fix + /clear command *)",
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Default web_research tier to gpt-5:online \\(OpenRouter auto-RAG\\) *)",
-      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 4: memory layer \\(Voyage embed/rerank + FTS5 + vec0 hybrid search\\) *)"
+      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 4: memory layer \\(Voyage embed/rerank + FTS5 + vec0 hybrid search\\) *)",
+      "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 9a: deploy scripts + systemd unit + Linux config builder *)"
     ]
   }
 }

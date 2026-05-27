@@ -1,0 +1,49 @@
+[Unit]
+Description=TARS personal agent (Telegram + scheduled jobs + dashboard)
+Documentation=https://github.com/idomosseri/tars
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tars
+Group=tars
+WorkingDirectory=/home/tars/tars
+
+# Path to the configuration file (mode 600, owner tars).
+Environment=TARS_CONFIG=/home/tars/.tars/config.toml
+
+# Run the bot (long-running asyncio process).
+# We pin uv at the user-local install path so PATH quirks don't matter.
+ExecStart=/home/tars/.local/bin/uv run python -m tars bot
+
+# Restart policy. on-failure (not 'always') so a deliberate exit 0 sticks.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging. Append to per-stream files; systemd-journald also captures via stdio.
+StandardOutput=append:/home/tars/logs/tars.log
+StandardError=append:/home/tars/logs/tars.err
+
+# Defensive hardening (these don't restrict TARS doing what it needs to do).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tars
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no   # disabled: Python JIT-y bits may need W+X pages
+
+# Resource guard so a runaway process can't OOM the whole box.
+MemoryHigh=2G
+MemoryMax=3G
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
