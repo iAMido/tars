@@ -28,7 +28,8 @@
       "Bash(claude mcp *)",
       "Bash(npm view *)",
       "mcp__github__list_issues",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "Bash(uv sync *)"
     ]
   }
 }

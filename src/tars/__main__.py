@@ -107,18 +107,39 @@ async def _cmd_reindex() -> int:
         await db.close()
 
 
+async def _cmd_briefing() -> int:
+    """Manually trigger the morning briefing job. For testing the wiring."""
+    from tars.agent import Agent
+    from tars.scheduler.morning_briefing import morning_briefing
+
+    log.info("TARS %s briefing (manual)", __version__)
+    cfg = load_config()
+    db = await Database.connect(cfg.paths.db)
+    try:
+        await db.migrate()
+        agent = Agent(db=db, cfg=cfg)
+        summary = await morning_briefing(agent, db, cfg)
+        log.info("briefing summary: %s", summary)
+        return 0
+    finally:
+        await db.close()
+
+
 async def _cmd_bot() -> int:
-    """Phase 3: long-running Telegram bot (long polling).
+    """Phase 3+: long-running Telegram bot + APScheduler.
 
     Ctrl+C stops cleanly. SIGTERM (systemd) does the same.
-    Phase 4 addition: reindex brain_docs once at startup so search_memory
-    works against current data."""
+    Phase 4: one-shot reindex on startup so search_memory works against current data.
+    Phase 6: AsyncIOScheduler shares the bot's event loop, persistent jobstore
+    in the same SQLite file. Missed jobs are picked up after restart within
+    misfire_grace_time."""
     import signal
 
     from tars.agent import Agent
     from tars.bot.handlers import run_bot
     from tars.memory.embed import Embedder
     from tars.memory.index import reindex_brain_docs
+    from tars.scheduler.jobs import build_scheduler
 
     log.info("TARS %s bot", __version__)
     cfg = load_config()
@@ -138,6 +159,16 @@ async def _cmd_bot() -> int:
             log.info("startup reindex: %s", summary)
         except Exception as e:  # noqa: BLE001
             log.exception("startup reindex failed (%s); search_memory will still work but may be stale", e)
+
+        # Build + start APScheduler on the SAME event loop as aiogram + FastAPI.
+        # Persistent jobstore so missed jobs recover after restart.
+        sched = build_scheduler(agent, db, cfg)
+        sched.start()
+        log.info(
+            "scheduler started with %d job(s): %s",
+            len(sched.get_jobs()),
+            [j.id for j in sched.get_jobs()],
+        )
 
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
@@ -161,6 +192,8 @@ async def _cmd_bot() -> int:
             if exc and not isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
                 log.exception("Bot task crashed", exc_info=exc)
                 return 1
+        # Stop scheduler before closing DB so any in-flight job completes first.
+        sched.shutdown(wait=False)
         return 0
     finally:
         await db.close()
@@ -183,6 +216,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bot", help="Run the Telegram bot (long polling). Ctrl+C to stop.")
     sub.add_parser("reindex", help="Rebuild FTS5 + vec0 indices from notes/messages/briefings.")
+    sub.add_parser("briefing", help="Manually run the morning briefing once (Phase 6 test).")
 
     return p
 
@@ -197,6 +231,8 @@ def main() -> int:
         return asyncio.run(_cmd_bot())
     if args.cmd == "reindex":
         return asyncio.run(_cmd_reindex())
+    if args.cmd == "briefing":
+        return asyncio.run(_cmd_briefing())
     return 1
 
 
