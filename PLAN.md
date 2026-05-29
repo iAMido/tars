@@ -21,7 +21,13 @@
 - Stuck on int8 vec_docs schema mismatch: voyageai 0.3.7 returns float32 regardless of `output_dtype="int8"`. Switched to `float[1024]`, lost the 4× space savings but unblocked indexing. Documented in commit 892a237.
 - Known polish item: TARS voice still too chatty (adds "Confirm if that's changed…" tails). Sharpen system prompt later.
 
-Remaining for V1: Phase 5 (entity store + follow-ups), Phase 6 (APScheduler + morning briefing), Phase 7 (Gmail/Cal OAuth), Phase 8 (dashboard), Phase 9b (restic backups), Phase 10 (polish).
+Remaining for V1, in current locked order:
+1. **Phase 5** — entity store + follow-up lifecycle (current)
+2. **Phase 6** — APScheduler + 05:00 morning briefing (requires Google OAuth setup, Phase 7 folded in)
+3. **Phase 9b** — restic backups to B2 + Storage Box
+4. **Obsidian mirror** — one-way Syncthing → Obsidian (slotted in here per user decision)
+5. **Phase 8** — FastAPI dashboard
+6. **Phase 10** — polish + V1 sign-off
 
 ---
 

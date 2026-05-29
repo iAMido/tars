@@ -55,7 +55,12 @@ SYSTEM_BLOCK = (
     "- search_memory: call for ANY user-specific question before answering. "
     "If results are empty, the answer is \"Unknown.\" — do not propose how the user could tell you.\n"
     "- save_note: only when the user explicitly states a fact to remember or uses the \"note:\" prefix.\n"
-    "- open_followup / close_followup: only when the user explicitly asks.\n"
+    "- Reminders: when the user says \"remind me to X\" or \"I promised Y\", "
+    "(1) save_note with the action, (2) get_current_time if a relative time was given, "
+    "(3) open_followup with the new note_id and ISO due time.\n"
+    "- Closing reminders: when the user says they did X, "
+    "(1) save_note about the resolution, (2) list_followups to find the matching followup_id, "
+    "(3) close_followup with both ids.\n"
     "- web_research: only on the /research command.\n"
     "\n"
     "Never invent dates, citations, or follow-up closures."
@@ -100,12 +105,12 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "open_followup",
-            "description": "Track a promise. Requires the note_id of the source note.",
+            "description": "Track a promise/reminder. Call save_note first to capture the promise, then open_followup with that note_id. Use get_current_time first if the user said 'tomorrow' / 'next week' etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "note_id": {"type": "integer"},
-                    "due_at_iso": {"type": "string", "description": "ISO 8601 timestamp."},
+                    "due_at_iso": {"type": "string", "description": "ISO 8601 timestamp with timezone, e.g. 2026-05-30T15:00:00+03:00. Omit if no specific time."},
                     "to": {"type": "string", "description": "Who the promise is to (optional)."},
                 },
                 "required": ["note_id"],
@@ -116,7 +121,7 @@ TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "close_followup",
-            "description": "Close a follow-up. Requires both the followup_id and a resolving_note_id.",
+            "description": "Close a follow-up. CITATION-GATED: save_note first to record what resolved it, then call close_followup with both ids. If the resolving_note_id does not exist, this fails.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -124,6 +129,32 @@ TOOLS: list[dict] = [
                     "resolving_note_id": {"type": "integer"},
                 },
                 "required": ["followup_id", "resolving_note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_followups",
+            "description": "List open follow-ups, soonest due first. Use this before close_followup to find the right followup_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Get current date/time. Call before scheduling follow-ups or interpreting 'today', 'tomorrow', 'in 2 hours', 'next week', etc. Returns ISO timestamp + weekday.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timezone": {"type": "string", "description": "IANA timezone name. Defaults to user's configured tz."},
+                },
             },
         },
     },

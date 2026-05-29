@@ -1,10 +1,11 @@
 """Tool implementations called by the Agent's tool loop.
 
 Status:
-  - save_note: real (writes to notes table)
-  - search_memory: real (Phase 4 — FTS5 + vec0 hybrid + Voyage rerank)
-  - open_followup / close_followup: stubs (real impl in Phase 5)
-  - web_research: stub (Phase 6+; the gpt-5:online tier handles live RAG for /research)
+  - save_note: real (writes to notes table + fires entity extraction)
+  - search_memory: real (FTS5 + vec0 hybrid + Voyage rerank + alias expansion)
+  - open_followup / close_followup / list_followups: real (Phase 5)
+  - get_current_time: real (Phase 5 — supports relative due dates)
+  - web_research: stub (the gpt-5:online tier handles live RAG for /research)
 
 Each tool function takes (db, args_dict) and returns a JSON-serializable result
 (a string that gets fed back to the model as the tool's content).
@@ -18,8 +19,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from tars.memory import entities as entities_mod
+from tars.memory import follow_ups as fu_mod
 from tars.memory.embed import Embedder
 from tars.memory.search import hybrid_search
 
@@ -52,8 +57,8 @@ async def save_note(db, args: dict[str, Any]) -> str:
 
     # Index the new note immediately so search_memory can find it on the very
     # next call. Failures are logged but never block the save.
+    cfg = getattr(db, "_cfg", None)
     try:
-        cfg = getattr(db, "_cfg", None)
         if cfg is not None:
             from tars.memory.index import index_single_doc  # local import: avoid cycle on load
             embedder = _get_embedder(db, cfg)
@@ -70,6 +75,11 @@ async def save_note(db, args: dict[str, Any]) -> str:
             "save_note: live index failed (%s); note saved as #%s, next reindex picks it up",
             e, note_id,
         )
+
+    # Fire-and-forget entity extraction. Runs in background; never blocks the
+    # save_note response. Failures are logged inside the helper.
+    if cfg is not None and note_id is not None:
+        entities_mod.schedule_extraction(db, cfg, int(note_id), body)
 
     return json.dumps({"ok": True, "note_id": note_id})
 
@@ -108,15 +118,60 @@ async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
 
 
 async def open_followup(db, args: dict[str, Any]) -> str:
-    # Phase 5 will replace this with real follow-up lifecycle.
-    return json.dumps(
-        {"status": "not_yet_implemented", "note": "follow-up lifecycle lands in Phase 5"}
-    )
+    try:
+        note_id = int(args.get("note_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return json.dumps({"error": "open_followup requires integer note_id"})
+    due = args.get("due_at_iso")
+    to = args.get("to")
+    try:
+        fu_id = await fu_mod.open_followup(
+            db, note_id=note_id, due_at_iso=due, promised_to=to
+        )
+    except fu_mod.FollowUpError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"ok": True, "followup_id": fu_id})
 
 
 async def close_followup(db, args: dict[str, Any]) -> str:
+    try:
+        fu_id = int(args.get("followup_id"))  # type: ignore[arg-type]
+        resolving = int(args.get("resolving_note_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return json.dumps(
+            {"error": "close_followup requires integer followup_id and resolving_note_id"}
+        )
+    try:
+        await fu_mod.close_followup(db, fu_id, resolving)
+    except fu_mod.FollowUpError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"ok": True, "followup_id": fu_id, "resolving_note_id": resolving})
+
+
+async def list_followups(db, args: dict[str, Any]) -> str:
+    limit = int(args.get("limit") or 20)
+    rows = await fu_mod.list_open(db, limit=limit)
+    return json.dumps({"open": rows})
+
+
+async def get_current_time(db, args: dict[str, Any]) -> str:
+    """Return current time so the model can compute relative due dates.
+    Defaults to the configured TARS timezone (Asia/Jerusalem)."""
+    cfg = getattr(db, "_cfg", None)
+    tz_name = args.get("timezone") or (cfg.timezone if cfg else "Asia/Jerusalem")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tz = ZoneInfo("Asia/Jerusalem")
+    now = datetime.now(tz)
     return json.dumps(
-        {"status": "not_yet_implemented", "note": "follow-up lifecycle lands in Phase 5"}
+        {
+            "iso": now.isoformat(timespec="seconds"),
+            "weekday": now.strftime("%A"),
+            "human": now.strftime("%A, %B %d, %Y at %I:%M %p %Z"),
+            "unix": int(now.timestamp()),
+            "timezone": str(tz),
+        }
     )
 
 
@@ -129,6 +184,8 @@ TOOL_REGISTRY = {
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,
+    "list_followups": list_followups,
+    "get_current_time": get_current_time,
     "web_research": web_research,
 }
 

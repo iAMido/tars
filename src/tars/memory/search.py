@@ -14,6 +14,7 @@ import logging
 
 from tars.db import Database
 from tars.memory.embed import Embedder, pack_int8
+from tars.memory.entities import resolve_aliases
 
 log = logging.getLogger("tars.memory.search")
 
@@ -58,12 +59,25 @@ async def hybrid_search(
     if not query.strip():
         return []
 
-    # --- 1. embed the query ---
+    # --- 0. alias expansion (entity store) ---
+    # If the query mentions a known alias ("OAI"), OR in the canonical
+    # form ("OpenAI") for the FTS5 leg. Embedding leg uses the original.
+    try:
+        canonicals = await resolve_aliases(db, query)
+    except Exception as e:  # noqa: BLE001
+        log.warning("alias expansion failed (%s); proceeding with raw query", e)
+        canonicals = set()
+    expanded_text = query
+    if canonicals:
+        expanded_text = query + " " + " ".join(sorted(canonicals))
+        log.info("query expanded with %d canonical(s): %s", len(canonicals), canonicals)
+
+    # --- 1. embed the query (original text, not expanded) ---
     qvecs = await embedder.embed([query], input_type="query")
     qvec_bytes = pack_int8(qvecs[0])
 
-    # --- 2. FTS5 BM25 candidates ---
-    fts_query = _fts5_escape(query)
+    # --- 2. FTS5 BM25 candidates (use expanded text for keyword match) ---
+    fts_query = _fts5_escape(expanded_text)
     try:
         fts_rows = await db.fetch_all(
             "SELECT doc_id, rank FROM brain_docs "

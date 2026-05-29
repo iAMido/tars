@@ -27,7 +27,8 @@
       "Bash(python -c \"import json; c=json.load\\(open\\(r'C:\\\\\\\\Users\\\\\\\\reutn\\\\\\\\.claude.json'\\)\\); print\\('top-level keys:', list\\(c.keys\\(\\)\\)[:30]\\); print\\('has mcpServers:', 'mcpServers' in c\\); print\\('mcpServers content:', json.dumps\\(c.get\\('mcpServers', {}\\), indent=2\\)[:500]\\)\")",
       "Bash(claude mcp *)",
       "Bash(npm view *)",
-      "mcp__github__list_issues"
+      "mcp__github__list_issues",
+      "Bash(uv run *)"
     ]
   }
 }
