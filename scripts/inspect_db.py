@@ -41,8 +41,33 @@ for r in db.execute(
     print(f"  #{r['id']:3d} {r['thread_key']:<20s} {r['role']:<10s} ${r['usd']} | {r['preview']}")
 
 print("\n=== notes ===")
-for r in db.execute("SELECT id, datetime(created_at,'unixepoch','localtime') AS created, source, body FROM notes ORDER BY id DESC LIMIT 10"):
-    print(f"  #{r['id']:3d} {r['created']} src={r['source']} | {r['body'][:80]}")
+for r in db.execute("SELECT id, datetime(created_at,'unixepoch','localtime') AS created, source, body, status FROM notes ORDER BY id DESC LIMIT 10"):
+    print(f"  #{r['id']:3d} {r['created']} src={r['source']} status={r['status']:6s} | {r['body'][:80]}")
+
+print("\n=== follow_ups ===")
+rows = db.execute(
+    "SELECT fu.id, fu.note_id, fu.status, fu.promised_to, "
+    "datetime(fu.due_at, 'unixepoch', 'localtime') AS due, "
+    "fu.reopened_count, n.body "
+    "FROM follow_ups fu JOIN notes n ON n.id = fu.note_id "
+    "ORDER BY fu.id DESC LIMIT 20"
+).fetchall()
+if not rows:
+    print("  (none)")
+for r in rows:
+    print(f"  #{r['id']:3d} note={r['note_id']} {r['status']:7s} due={r['due']} "
+          f"to={r['promised_to']} reopens={r['reopened_count']} | {r['body'][:60]}")
+
+print("\n=== entities ===")
+ents = db.execute("SELECT id, canonical, kind FROM entities ORDER BY id").fetchall()
+if not ents:
+    print("  (none)")
+for e in ents:
+    aliases = db.execute(
+        "SELECT alias FROM entity_aliases WHERE entity_id = ? ORDER BY alias", (e['id'],)
+    ).fetchall()
+    alist = ", ".join(a['alias'] for a in aliases)
+    print(f"  #{e['id']:3d} [{e['kind']:8s}] {e['canonical']}  aliases=[{alist}]")
 
 print("\n=== totals ===")
 total = db.execute("SELECT printf('%.6f', SUM(cost_usd)) AS t, COUNT(*) AS n FROM cost_ledger").fetchone()
