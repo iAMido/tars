@@ -1,0 +1,28 @@
+[Unit]
+Description=TARS daily backup (SQLite snapshot + restic to B2)
+Documentation=https://github.com/iAMido/tars
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tars
+Group=tars
+
+# Secrets live here; root:tars 0440 so the service can read but only root edits.
+EnvironmentFile=/etc/tars/restic.env
+
+ExecStart=/home/tars/tars/scripts/tars-backup.sh
+
+# Logging.
+StandardOutput=append:/home/tars/logs/backup.log
+StandardError=append:/home/tars/logs/backup.err
+
+# Sandboxing.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tars
+ProtectKernelTunables=yes
+ProtectControlGroups=yes

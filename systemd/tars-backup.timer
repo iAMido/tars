@@ -1,0 +1,16 @@
+[Unit]
+Description=TARS daily backup timer (06:00 Asia/Jerusalem, runs tars-backup.service)
+Documentation=https://github.com/iAMido/tars
+
+[Timer]
+# Run at 06:00 local time daily. After morning_briefing has run at 05:00,
+# so today's briefing makes it into today's backup.
+OnCalendar=*-*-* 06:00:00
+# If the box was off at 06:00, run on next boot.
+Persistent=true
+# Random 5-min jitter so we don't hammer B2 at exactly :00 every day.
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
