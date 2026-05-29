@@ -32,12 +32,15 @@ LOG_FILE="${LOG_FILE:-$TARS_HOME/logs/backup.log}"
 
 # --- helpers ---
 log() {
-    local msg="$(date -u '+%Y-%m-%dT%H:%M:%SZ') backup: $*"
-    echo "$msg" | tee -a "$LOG_FILE" >&2
+    # systemd already captures stderr to backup.err and stdout to backup.log
+    # (configured in tars-backup.service via StandardOutput/StandardError).
+    # Don't duplicate-write here — that hits permission-denied because the
+    # files are pre-created by systemd as root.
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') backup: $*" >&2
 }
 die() { log "ERROR: $*"; exit 1; }
 
-mkdir -p "$SNAP_DIR" "$(dirname "$LOG_FILE")"
+mkdir -p "$SNAP_DIR"
 log "=== tars-backup start ==="
 
 # --- 1. SQLite online backup ---
