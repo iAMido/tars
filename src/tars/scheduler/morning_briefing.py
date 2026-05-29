@@ -15,6 +15,8 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
@@ -56,37 +58,62 @@ async def _safe_calendar() -> tuple[list[dict], str | None]:
         return [], f"calendar unavailable: {type(e).__name__}"
 
 
-async def _safe_followups(db) -> list[dict]:
+def _human_due(due_ts: int | None, now_dt: datetime) -> str | None:
+    """Render a due timestamp as 'today 15:00', 'tomorrow 09:00', 'Friday 10:00',
+    or 'YYYY-MM-DD HH:MM' for further-out items. Returns None for no-due."""
+    if not due_ts:
+        return None
+    due = datetime.fromtimestamp(due_ts, tz=now_dt.tzinfo)
+    today = now_dt.date()
+    due_date = due.date()
+    days = (due_date - today).days
+    time_part = due.strftime("%H:%M")
+    if days == 0:
+        return f"today {time_part}"
+    if days == 1:
+        return f"tomorrow {time_part}"
+    if 1 < days <= 7:
+        return f"{due.strftime('%A')} {time_part}"
+    return f"{due_date.isoformat()} {time_part}"
+
+
+async def _safe_followups(db, now_dt: datetime) -> list[dict]:
     try:
         fus = await list_open(db, limit=10)
-        horizon = int(time.time()) + FOLLOWUP_HORIZON_DAYS * 86400
-        return [
-            {
-                "id": f["followup_id"],
-                "note_id": f["note_id"],
-                "promised_to": f["promised_to"],
-                "due": (
-                    datetime.fromtimestamp(f["due_at"], tz=timezone.utc).isoformat()
-                    if f["due_at"]
-                    else None
-                ),
-                "body": (f["body"] or "")[:200],
-            }
-            for f in fus
-            if f["due_at"] is None or f["due_at"] <= horizon
-        ]
+        horizon = int(now_dt.timestamp()) + FOLLOWUP_HORIZON_DAYS * 86400
+        out = []
+        for f in fus:
+            due_ts = f.get("due_at")
+            if due_ts is not None and due_ts > horizon:
+                continue
+            out.append(
+                {
+                    "id": f["followup_id"],
+                    "note_id": f["note_id"],
+                    "promised_to": f["promised_to"],
+                    "due_human": _human_due(due_ts, now_dt),
+                    "body": (f["body"] or "")[:200],
+                }
+            )
+        return out
     except Exception as e:  # noqa: BLE001
         log.warning("morning_briefing: follow-ups query failed (%s)", e)
         return []
 
 
 PROMPT_TEMPLATE = (
-    "Compose today's morning briefing. Tight, TARS voice. "
-    "Sections only if non-empty: Email, Calendar, Open follow-ups, Heads-up.\n"
-    "No greeting, no sign-off. Two to four sentences per section maximum.\n"
-    "Cite follow-ups as [followup:N] and any source-note as [note:N] when relevant.\n"
+    "Compose today's morning briefing in TARS voice.\n"
     "\n"
-    "Source data (JSON):\n{payload}\n"
+    "STRICT format rules:\n"
+    "- Render ONLY the sections whose JSON key is present in the payload. "
+    "If a section's data is absent from the JSON below, do not write its header at all.\n"
+    "- Possible section headers (only when their data exists): *Email*, *Calendar*, *Open follow-ups*, *Warnings*.\n"
+    "- 1-3 lines per section. No greeting, no sign-off, no commentary.\n"
+    "- For follow-ups: cite as [followup:N]. Include due_human verbatim if present (e.g. 'today 15:00').\n"
+    "- For emails: one line per email, 'From — Subject'.\n"
+    "- For calendar events: one line per event, 'HH:MM — Title' if same-day, else 'YYYY-MM-DD HH:MM — Title'.\n"
+    "\n"
+    "Payload:\n{payload}\n"
     "\n"
     "Briefing:"
 )
@@ -105,20 +132,27 @@ async def morning_briefing(agent, db, cfg) -> dict:
     (the `tars briefing` CLI subcommand)."""
     t0 = time.time()
     now = int(t0)
-    today = datetime.fromtimestamp(t0).date().isoformat()
+    tz = ZoneInfo(cfg.timezone)
+    now_dt = datetime.fromtimestamp(t0, tz=tz)
+    today = now_dt.date().isoformat()
     log.info("morning_briefing: running for date=%s", today)
 
     emails, email_err = await _safe_gmail(now)
     cal, cal_err = await _safe_calendar()
-    fus = await _safe_followups(db)
+    fus = await _safe_followups(db, now_dt)
+    warnings = [w for w in (email_err, cal_err) if w]
 
-    payload = {
-        "date": today,
-        "emails": emails,
-        "calendar": cal,
-        "open_followups": fus,
-        "warnings": [w for w in (email_err, cal_err) if w],
-    }
+    # Build payload skipping empty sections — the LLM only renders headers
+    # for keys actually present.
+    payload: dict[str, Any] = {"date": today}
+    if emails:
+        payload["emails"] = emails
+    if cal:
+        payload["calendar"] = cal
+    if fus:
+        payload["open_followups"] = fus
+    if warnings:
+        payload["warnings"] = warnings
 
     out = await agent.chat(
         thread_key="job:morning_briefing",
