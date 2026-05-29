@@ -142,6 +142,69 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         )
         await m.answer("Conversation cleared. Notes and follow-ups preserved.")
 
+    @dp.message(Command("stats"), auth)
+    async def _stats(m: Message) -> None:
+        """One-shot snapshot: recent cost, notes, open follow-ups, scheduled jobs."""
+        import time as _time
+        db = agent.db
+
+        now = int(_time.time())
+        today_start = now - (now % 86400)
+
+        # Costs
+        row = await db.fetch_one(
+            "SELECT ROUND(SUM(cost_usd),6) AS c, COUNT(*) AS n FROM cost_ledger WHERE ts >= ?",
+            (now - 7 * 86400,),
+        )
+        cost_7d = row["c"] if row and row["c"] else 0.0
+        calls_7d = row["n"] if row else 0
+        row = await db.fetch_one(
+            "SELECT ROUND(SUM(cost_usd),6) AS c, COUNT(*) AS n FROM cost_ledger WHERE ts >= ?",
+            (today_start,),
+        )
+        cost_today = row["c"] if row and row["c"] else 0.0
+        calls_today = row["n"] if row else 0
+
+        # Counts
+        n_notes = (await db.fetch_one("SELECT COUNT(*) AS n FROM notes"))["n"]
+        n_open_fu = (await db.fetch_one(
+            "SELECT COUNT(*) AS n FROM follow_ups WHERE status='open'"
+        ))["n"]
+        n_entities = (await db.fetch_one("SELECT COUNT(*) AS n FROM entities"))["n"]
+
+        # Scheduled jobs
+        try:
+            jobs = await db.fetch_all(
+                "SELECT id, next_run_time FROM apscheduler_jobs ORDER BY next_run_time"
+            )
+            jobs_lines = []
+            for j in jobs[:5]:
+                ts = float(j["next_run_time"]) if j["next_run_time"] else None
+                if ts:
+                    delta = int(ts - now)
+                    if delta < 0:
+                        when = "overdue"
+                    elif delta < 3600:
+                        when = f"in {delta // 60}m"
+                    elif delta < 86400:
+                        when = f"in {delta // 3600}h"
+                    else:
+                        when = f"in {delta // 86400}d"
+                else:
+                    when = "?"
+                jobs_lines.append(f"- {j['id']}: {when}")
+            jobs_text = "\n".join(jobs_lines) if jobs_lines else "no jobs"
+        except Exception:  # noqa: BLE001
+            jobs_text = "scheduler offline"
+
+        text = (
+            f"Today: ${cost_today:.4f} / {calls_today} calls\n"
+            f"7d:    ${cost_7d:.4f} / {calls_7d} calls\n"
+            f"Notes: {n_notes}, open follow-ups: {n_open_fu}, entities: {n_entities}\n"
+            f"\nNext jobs:\n{jobs_text}"
+        )
+        await m.answer(text)
+
     @dp.message(Command("tier"), auth)
     async def _tier_info(m: Message) -> None:
         t = cfg.tiers

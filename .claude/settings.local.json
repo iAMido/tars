@@ -29,7 +29,8 @@
       "Bash(npm view *)",
       "mcp__github__list_issues",
       "Bash(uv run *)",
-      "Bash(uv sync *)"
+      "Bash(uv sync *)",
+      "Bash(git tag -a v1.0.0 -m 'V1.0.0 — TARS feature-complete personal AI agent *)"
     ]
   }
 }

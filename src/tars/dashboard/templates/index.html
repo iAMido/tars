@@ -149,7 +149,10 @@ const fmtTime = ts => {
   const hhmm = d.toTimeString().slice(0,5);
   if (d >= today && d < tomorrow) return `today ${hhmm}`;
   if (d >= tomorrow && d < day_after) return `tomorrow ${hhmm}`;
-  return d.toISOString().slice(0,16).replace('T',' ');
+  // Format in the browser's local tz (which on a tailnet member = user's tz),
+  // not UTC. Sunday 18:00 IDT must not render as "15:00".
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day} ${hhmm}`;
 };
 const escapeHtml = s => (s || '').toString()
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
