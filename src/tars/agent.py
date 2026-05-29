@@ -27,10 +27,12 @@ from tars.tools import run_tool
 log = logging.getLogger("tars.agent")
 
 HISTORY_LIMIT = 40
-# Interactive chat: 2 iterations are enough for one search_memory call + final
-# answer. Bumping past 2 typically means the model is over-trying or stuck.
+# Interactive chat: 4 iterations covers the longest legitimate flow,
+# the follow-up creation: save_note -> get_current_time -> open_followup -> final.
+# Anything past 4 typically means the model is stuck or thrashing. The router's
+# max_tokens cap (TIER_MAX_TOKENS) keeps each individual turn bounded.
 # /research can override with a larger value via the chat() parameter.
-TOOL_LOOP_MAX = 2
+TOOL_LOOP_MAX = 4
 
 
 class Agent:
