@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TARS</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --success: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa; --panel: #fff; --border: #d0d7de; --text: #1f2328;
+    --muted: #656d76; --accent: #0969da;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 14px; line-height: 1.5;
+}
+h1 { margin: 0 0 4px; font-size: 24px; font-weight: 700; }
+h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+.header .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.panel-wide { grid-column: 1 / -1; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+tr:last-child td { border-bottom: none; }
+td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+td.num { text-align: right; }
+.tag { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.tag.open { background: var(--warn); color: #000; }
+.tag.closed { background: var(--success); color: #000; }
+.tag.note { background: var(--border); }
+.cost-chart { display: flex; align-items: flex-end; gap: 4px; height: 96px; padding-top: 8px; }
+.bar { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; position: relative; opacity: 0.85; }
+.bar:hover { opacity: 1; }
+.bar:hover::after {
+  content: attr(data-label); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--border); padding: 4px 6px; font-size: 11px; white-space: nowrap;
+  border-radius: 4px; z-index: 10;
+}
+.bar-label { font-size: 10px; color: var(--muted); text-align: center; margin-top: 4px; }
+.kpi { display: flex; gap: 16px; flex-wrap: wrap; }
+.kpi-item { flex: 1; min-width: 100px; }
+.kpi-val { font-size: 24px; font-weight: 700; font-family: var(--mono); }
+.kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+pre.briefing { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 0; font-size: 13px; max-height: 240px; overflow-y: auto; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); margin-right: 6px; }
+.dot.warn { background: var(--warn); }
+.dot.danger { background: var(--danger); }
+.muted { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1><span class="dot" id="status-dot"></span>TARS</h1>
+    <div class="meta" id="header-meta">connecting…</div>
+  </div>
+  <div class="meta">auto-refresh 10s · <a href="#" id="refresh" style="color:var(--accent)">refresh now</a></div>
+</div>
+
+<div class="grid">
+
+  <div class="panel panel-wide">
+    <h2>Headline</h2>
+    <div class="kpi" id="kpi"></div>
+  </div>
+
+  <div class="panel panel-wide">
+    <h2>Cost (last 14 days)</h2>
+    <div class="cost-chart" id="cost-chart"></div>
+    <div id="cost-labels" style="display:flex; gap:4px;"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Scheduled jobs <span class="muted">(live)</span></h2>
+    <table id="jobs-table">
+      <thead><tr><th>job</th><th class="num">next run</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Open follow-ups</h2>
+    <table id="followups-table">
+      <thead><tr><th>id</th><th>body</th><th class="num">due</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Recent notes</h2>
+    <table id="notes-table">
+      <thead><tr><th>id</th><th>body</th><th>status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Conversations</h2>
+    <table id="convos-table">
+      <thead><tr><th>thread</th><th class="num">msgs</th><th class="num">cost</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Entities <span class="muted">(person / org / project)</span></h2>
+    <table id="entities-table">
+      <thead><tr><th>canonical</th><th>kind</th><th>aliases</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel panel-wide">
+    <h2>Latest briefing</h2>
+    <pre class="briefing" id="briefing">(none yet)</pre>
+  </div>
+
+</div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+const fmt = (n, d=4) => (n == null ? '–' : Number(n).toFixed(d));
+const fmtTime = ts => {
+  if (!ts) return '–';
+  const d = new Date(ts * 1000);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+  const day_after = new Date(tomorrow); day_after.setDate(tomorrow.getDate() + 1);
+  const hhmm = d.toTimeString().slice(0,5);
+  if (d >= today && d < tomorrow) return `today ${hhmm}`;
+  if (d >= tomorrow && d < day_after) return `tomorrow ${hhmm}`;
+  return d.toISOString().slice(0,16).replace('T',' ');
+};
+const escapeHtml = s => (s || '').toString()
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return await r.json();
+}
+
+async function renderHeadline() {
+  const h = await getJSON('/api/health');
+  $('#header-meta').textContent =
+    `v${h.version} · tz=${h.tz} · uptime ${(h.uptime_s/3600).toFixed(1)}h · ${h.scheduled_jobs} jobs`;
+  $('#status-dot').className = h.ok ? 'dot' : 'dot danger';
+
+  const daily = await getJSON('/api/costs/daily?days=30');
+  const totalAll = daily.reduce((s,r) => s + (r.cost || 0), 0);
+  const last7 = daily.slice(-7).reduce((s,r) => s + (r.cost || 0), 0);
+  const cached_total = daily.reduce((s,r) => s + (r.cached || 0), 0);
+  const pt_total = daily.reduce((s,r) => s + (r.pt || 0), 0);
+  const cache_pct = pt_total ? (cached_total / pt_total * 100) : 0;
+  $('#kpi').innerHTML = `
+    <div class="kpi-item"><div class="kpi-val">$${totalAll.toFixed(4)}</div><div class="kpi-label">spend last 30d</div></div>
+    <div class="kpi-item"><div class="kpi-val">$${last7.toFixed(4)}</div><div class="kpi-label">last 7d</div></div>
+    <div class="kpi-item"><div class="kpi-val">${cache_pct.toFixed(0)}%</div><div class="kpi-label">prefix cache hit</div></div>
+    <div class="kpi-item"><div class="kpi-val">${h.notes}</div><div class="kpi-label">notes total</div></div>
+  `;
+}
+
+async function renderCostChart() {
+  const daily = await getJSON('/api/costs/daily?days=14');
+  const max = Math.max(0.0001, ...daily.map(r => r.cost || 0));
+  $('#cost-chart').innerHTML = daily.map(r => {
+    const h = ((r.cost || 0) / max) * 100;
+    return `<div class="bar" style="height:${h}%" data-label="${r.d}: $${fmt(r.cost,4)} (${r.n} calls)"></div>`;
+  }).join('');
+  $('#cost-labels').innerHTML = daily.map(r =>
+    `<div class="bar-label" style="flex:1">${r.d.slice(5)}</div>`
+  ).join('');
+}
+
+function renderJobs(jobs) {
+  if (!Array.isArray(jobs)) jobs = [];
+  const tbody = $('#jobs-table tbody');
+  tbody.innerHTML = jobs.length === 0
+    ? `<tr><td colspan="2" class="muted">no jobs</td></tr>`
+    : jobs.map(j =>
+        `<tr><td class="mono">${escapeHtml(j.id)}</td>
+             <td class="num mono">${fmtTime(j.next_run_unix)}</td></tr>`
+      ).join('');
+}
+
+async function renderFollowups() {
+  const fu = await getJSON('/api/followups');
+  const tbody = $('#followups-table tbody');
+  tbody.innerHTML = fu.length === 0
+    ? `<tr><td colspan="3" class="muted">no open follow-ups</td></tr>`
+    : fu.map(f => `
+        <tr>
+          <td><span class="tag open">#${f.id}</span></td>
+          <td>${escapeHtml((f.body || '').slice(0, 60))}</td>
+          <td class="num mono">${f.due_at ? fmtTime(f.due_at) : '–'}</td>
+        </tr>`).join('');
+}
+
+async function renderNotes() {
+  const ns = await getJSON('/api/notes?limit=15');
+  $('#notes-table tbody').innerHTML = ns.map(n => `
+    <tr>
+      <td>#${n.id}</td>
+      <td>${escapeHtml((n.body || '').slice(0, 70))}</td>
+      <td><span class="tag ${n.status||'note'}">${escapeHtml(n.status || 'note')}</span></td>
+    </tr>`).join('');
+}
+
+async function renderConvos() {
+  const cs = await getJSON('/api/conversations');
+  $('#convos-table tbody').innerHTML = cs.slice(0, 10).map(c => `
+    <tr>
+      <td class="mono">${escapeHtml(c.thread_key)}</td>
+      <td class="num">${c.msg_count}</td>
+      <td class="num mono">$${fmt(c.cost || 0, 4)}</td>
+    </tr>`).join('');
+}
+
+async function renderEntities() {
+  const ents = await getJSON('/api/entities');
+  $('#entities-table tbody').innerHTML = ents.length === 0
+    ? `<tr><td colspan="3" class="muted">no entities yet</td></tr>`
+    : ents.slice(0, 20).map(e => `
+        <tr>
+          <td><b>${escapeHtml(e.canonical)}</b></td>
+          <td><span class="tag">${escapeHtml(e.kind)}</span></td>
+          <td class="muted mono">${escapeHtml(e.aliases || '')}</td>
+        </tr>`).join('');
+}
+
+async function renderBriefing() {
+  const bs = await getJSON('/api/briefings?limit=1');
+  if (bs.length === 0) {
+    $('#briefing').textContent = '(no briefing yet — fires daily 05:00)';
+    return;
+  }
+  $('#briefing').textContent = `${bs[0].date}\n\n${bs[0].summary}`;
+}
+
+async function refresh() {
+  try {
+    await Promise.all([
+      renderHeadline(),
+      renderCostChart(),
+      renderFollowups(),
+      renderNotes(),
+      renderConvos(),
+      renderEntities(),
+      renderBriefing(),
+    ]);
+  } catch (e) {
+    console.error(e);
+    $('#header-meta').textContent = 'error: ' + e.message;
+    $('#status-dot').className = 'dot danger';
+  }
+}
+
+// SSE for jobs — pushes updates every 2s.
+function startJobsStream() {
+  const es = new EventSource('/api/jobs/stream');
+  es.addEventListener('jobs', ev => {
+    try { renderJobs(JSON.parse(ev.data)); } catch {}
+  });
+  es.onerror = () => { es.close(); setTimeout(startJobsStream, 5000); };
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  refresh();
+  startJobsStream();
+  setInterval(refresh, 10000);
+  $('#refresh').addEventListener('click', e => { e.preventDefault(); refresh(); });
+});
+</script>
+
+</body>
+</html>

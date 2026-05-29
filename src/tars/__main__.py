@@ -159,6 +159,7 @@ async def _cmd_bot() -> int:
 
     from tars.agent import Agent
     from tars.bot.handlers import run_bot
+    from tars.dashboard.app import run_dashboard
     from tars.memory.embed import Embedder
     from tars.memory.index import reindex_brain_docs
     from tars.scheduler.jobs import build_scheduler
@@ -202,17 +203,18 @@ async def _cmd_bot() -> int:
             # still cancels the task, which is fine for dev.
             pass
 
-        bot_task = asyncio.create_task(run_bot(agent, cfg))
-        stop_task = asyncio.create_task(stop.wait())
+        bot_task = asyncio.create_task(run_bot(agent, cfg), name="bot")
+        dash_task = asyncio.create_task(run_dashboard(db, cfg), name="dashboard")
+        stop_task = asyncio.create_task(stop.wait(), name="stop")
         done, pending = await asyncio.wait(
-            {bot_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            {bot_task, dash_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
         )
         for t in pending:
             t.cancel()
         for t in done:
             exc = t.exception()
             if exc and not isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
-                log.exception("Bot task crashed", exc_info=exc)
+                log.exception("%s task crashed", t.get_name(), exc_info=exc)
                 return 1
         # Stop scheduler before closing DB so any in-flight job completes first.
         sched.shutdown(wait=False)
