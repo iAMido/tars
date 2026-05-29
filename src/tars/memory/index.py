@@ -172,61 +172,79 @@ async def index_single_doc(
     return doc_id
 
 
-async def reindex_brain_docs(db: Database, embedder: Embedder) -> dict:
-    """Embed every source doc, upsert into brain_docs + vec_docs.
+async def reindex_brain_docs(db: Database, embedder: Embedder, *, full: bool = False) -> dict:
+    """Embed and upsert source docs into brain_docs + vec_docs.
+
+    Default: diff mode — skip docs whose body_hash matches what's already
+    recorded in doc_index. `full=True` re-embeds everything (use for the
+    one-shot startup reindex or after a schema change).
 
     Returns a small summary dict for logging."""
     t0 = time.time()
     docs = await _collect_documents(db)
     if not docs:
         log.info("reindex: nothing to index")
-        return {"indexed": 0, "elapsed_s": 0.0}
+        return {"indexed": 0, "skipped": 0, "elapsed_s": 0.0}
 
-    # Allocate stable doc_ids in batch.
-    doc_ids: list[int] = []
+    # Allocate stable doc_ids + read existing body_hash for each.
     for d in docs:
-        doc_id = await _get_or_create_doc_id(db, d["source"], d["source_ref"])
-        doc_ids.append(doc_id)
-        d["doc_id"] = doc_id
+        d["doc_id"] = await _get_or_create_doc_id(db, d["source"], d["source_ref"])
+        d["body_hash"] = _body_hash(d["body"])
 
-    # Embed in batches.
-    bodies = [d["body"] for d in docs]
+    if full:
+        to_index = docs
+        skipped = 0
+    else:
+        # Diff: skip docs whose hash matches what's already on disk.
+        existing = await db.fetch_all(
+            "SELECT doc_id, body_hash FROM doc_index WHERE body_hash IS NOT NULL"
+        )
+        existing_map = {int(r["doc_id"]): r["body_hash"] for r in existing}
+        to_index = [d for d in docs if existing_map.get(d["doc_id"]) != d["body_hash"]]
+        skipped = len(docs) - len(to_index)
+
+    if not to_index:
+        elapsed = time.time() - t0
+        log.info("reindex: 0 changed, %d unchanged (elapsed=%.2fs)", skipped, elapsed)
+        return {"indexed": 0, "skipped": skipped, "elapsed_s": elapsed}
+
+    # Embed in batches (only the changed ones).
+    bodies = [d["body"] for d in to_index]
     vectors: list[list[int]] = []
     for i in range(0, len(bodies), EMBED_MAX_BATCH):
         batch = bodies[i : i + EMBED_MAX_BATCH]
         vectors.extend(await embedder.embed(batch, input_type="document"))
 
-    # Upsert into both virtual tables. DELETE-then-INSERT is the FTS5+vec0 idiom.
     now = int(time.time())
-    for d, vec in zip(docs, vectors, strict=True):
+    for d, vec in zip(to_index, vectors, strict=True):
         doc_id = d["doc_id"]
-
         await db.execute("DELETE FROM brain_docs WHERE doc_id = ?", (doc_id,))
         await db.execute(
             "INSERT INTO brain_docs(doc_id, source, title, body, tags) "
             "VALUES (?, ?, ?, ?, ?)",
             (doc_id, d["source"], d["title"], d["body"], d["tags"]),
         )
-
         await db.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
         await db.execute(
             "INSERT INTO vec_docs(doc_id, embedding) VALUES (?, ?)",
             (doc_id, pack_int8(vec)),
         )
-
         await db.execute(
             "UPDATE doc_index SET indexed_at = ?, body_hash = ? WHERE doc_id = ?",
-            (now, _body_hash(d["body"]), doc_id),
+            (now, d["body_hash"], doc_id),
         )
 
     elapsed = time.time() - t0
     by_source: dict[str, int] = {}
-    for d in docs:
+    for d in to_index:
         by_source[d["source"]] = by_source.get(d["source"], 0) + 1
     log.info(
-        "reindex done: %d docs in %.2fs by_source=%s",
-        len(docs),
-        elapsed,
-        by_source,
+        "reindex done: %d changed, %d unchanged in %.2fs by_source=%s",
+        len(to_index), skipped, elapsed, by_source,
     )
-    return {"indexed": len(docs), "elapsed_s": elapsed, "by_source": by_source}
+    return {
+        "indexed": len(to_index),
+        "skipped": skipped,
+        "elapsed_s": elapsed,
+        "by_source": by_source,
+    }

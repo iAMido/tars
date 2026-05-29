@@ -107,22 +107,44 @@ async def _cmd_reindex() -> int:
         await db.close()
 
 
-async def _cmd_briefing() -> int:
-    """Manually trigger the morning briefing job. For testing the wiring."""
+async def _cmd_job(name: str) -> int:
+    """Manually trigger any scheduler job. For testing."""
     from tars.agent import Agent
-    from tars.scheduler.morning_briefing import morning_briefing
 
-    log.info("TARS %s briefing (manual)", __version__)
+    log.info("TARS %s job (manual): %s", __version__, name)
     cfg = load_config()
     db = await Database.connect(cfg.paths.db)
     try:
         await db.migrate()
         agent = Agent(db=db, cfg=cfg)
-        summary = await morning_briefing(agent, db, cfg)
-        log.info("briefing summary: %s", summary)
+
+        if name == "morning_briefing":
+            from tars.scheduler.morning_briefing import morning_briefing
+            summary = await morning_briefing(agent, db, cfg)
+        elif name == "email_summary":
+            from tars.scheduler.email_summary import email_summary
+            summary = await email_summary(agent, db, cfg)
+        elif name == "calendar_pull":
+            from tars.scheduler.calendar_pull import calendar_pull
+            summary = await calendar_pull(db, cfg)
+        elif name == "brain_reindex":
+            from tars.scheduler.brain_reindex import brain_reindex
+            summary = await brain_reindex(db, cfg)
+        elif name == "weekly_followup_reconcile":
+            from tars.scheduler.weekly_followup_reconcile import weekly_followup_reconcile
+            summary = await weekly_followup_reconcile(db, cfg)
+        else:
+            log.error("unknown job: %s", name)
+            return 2
+        log.info("job %s summary: %s", name, summary)
         return 0
     finally:
         await db.close()
+
+
+# Back-compat alias so 'tars briefing' still works.
+async def _cmd_briefing() -> int:
+    return await _cmd_job("morning_briefing")
 
 
 async def _cmd_bot() -> int:
@@ -216,7 +238,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bot", help="Run the Telegram bot (long polling). Ctrl+C to stop.")
     sub.add_parser("reindex", help="Rebuild FTS5 + vec0 indices from notes/messages/briefings.")
-    sub.add_parser("briefing", help="Manually run the morning briefing once (Phase 6 test).")
+    sub.add_parser("briefing", help="Manually run the morning briefing once (alias for `job morning_briefing`).")
+
+    pjob = sub.add_parser("job", help="Manually trigger a scheduler job by name.")
+    pjob.add_argument(
+        "name",
+        choices=[
+            "morning_briefing",
+            "email_summary",
+            "calendar_pull",
+            "brain_reindex",
+            "weekly_followup_reconcile",
+        ],
+    )
 
     return p
 
@@ -233,6 +267,8 @@ def main() -> int:
         return asyncio.run(_cmd_reindex())
     if args.cmd == "briefing":
         return asyncio.run(_cmd_briefing())
+    if args.cmd == "job":
+        return asyncio.run(_cmd_job(args.name))
     return 1
 
 
