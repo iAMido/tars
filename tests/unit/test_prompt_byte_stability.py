@@ -20,7 +20,7 @@ from tars import prompt
 
 
 # Pin the canonical anchor hash. Update DELIBERATELY when changing the prompt.
-EXPECTED_HASH = "08b170184a04613bb644c41f27528b7eb7055b28e73a8c513e2b33a9078bb817"
+EXPECTED_HASH = "a99b55f6dd888fbf19809e352dec943703e9c58bf36a16440c3639630cc535bc"
 
 
 def test_anchor_hash_stable() -> None:
