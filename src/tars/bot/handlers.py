@@ -164,7 +164,14 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             out = await _with_typing(
                 bot,
                 m.chat.id,
-                agent.chat(thread_key=thread_key, user_text=text, tier="web_research"),
+                # web_research can need several tool iterations; override the
+                # interactive default of 2.
+                agent.chat(
+                    thread_key=thread_key,
+                    user_text=text,
+                    tier="web_research",
+                    tool_loop_max=6,
+                ),
             )
             await _send_long(bot, m.chat.id, out["text"])
         except Exception as e:  # noqa: BLE001

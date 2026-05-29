@@ -48,7 +48,12 @@ class NetworkConfig(BaseModel):
 
 
 class TiersConfig(BaseModel):
-    interactive_fast: str = "openai/gpt-5-mini"
+    # Switched from openai/gpt-5-mini to deepseek-v3.2 after observing
+    # gpt-5-mini producing 1500+ token essays despite explicit "be terse"
+    # prompt rules, with 7-60s response times. DeepSeek V3.2 follows persona
+    # constraints more strictly, has faster first-token, and is ~10x cheaper
+    # on input ($0.026 vs $0.25 per 1M tokens).
+    interactive_fast: str = "deepseek/deepseek-v3.2"
     cron_default: str = "deepseek/deepseek-v3.2"
     ingest: str = "deepseek/deepseek-v3.2"
     # The :online suffix enables OpenRouter's web-search plugin (Perplexity-style

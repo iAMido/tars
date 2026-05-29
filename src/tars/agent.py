@@ -27,7 +27,10 @@ from tars.tools import run_tool
 log = logging.getLogger("tars.agent")
 
 HISTORY_LIMIT = 40
-TOOL_LOOP_MAX = 4
+# Interactive chat: 2 iterations are enough for one search_memory call + final
+# answer. Bumping past 2 typically means the model is over-trying or stuck.
+# /research can override with a larger value via the chat() parameter.
+TOOL_LOOP_MAX = 2
 
 
 class Agent:

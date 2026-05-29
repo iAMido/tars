@@ -34,6 +34,16 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 COOLDOWN_SECONDS = 60
 HTTP_TIMEOUT_SECONDS = 60.0
 
+# Per-tier hard cap on completion tokens. Guardrail against verbose models that
+# ignore "be terse" prompt rules. interactive_fast in particular has been
+# observed to generate 1500+ token essays despite explicit instructions.
+TIER_MAX_TOKENS: dict[str, int] = {
+    "interactive_fast": 400,    # short Telegram answers — never a paragraph essay
+    "cron_default": 1500,       # morning briefings etc can be longer
+    "ingest": 800,              # entity extraction, summaries
+    "web_research": 2000,       # /research command, full report
+}
+
 # OpenAI direct: substitute non-OpenAI models with a safe OpenAI equivalent.
 OPENAI_DIRECT_SUBSTITUTIONS: dict[str, str] = {
     # If the primary tier model was a DeepSeek route, fall back to a cheap
@@ -140,13 +150,20 @@ async def _post(provider: str, url: str, body: dict, headers: dict) -> dict:
         return r.json()
 
 
+def _apply_max_tokens(body: dict, tier: str) -> None:
+    cap = TIER_MAX_TOKENS.get(tier)
+    if cap is not None:
+        body["max_tokens"] = cap
+
+
 async def _call_openrouter(
-    model: str, messages: list[dict], tools: list[dict] | None, cfg
+    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str
 ) -> dict:
     body: dict[str, Any] = {"model": model, "messages": messages}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    _apply_max_tokens(body, tier)
     headers = {
         "Authorization": f"Bearer {cfg.openrouter.api_key}",
         "HTTP-Referer": "https://tars.local",
@@ -156,7 +173,7 @@ async def _call_openrouter(
 
 
 async def _call_openai(
-    model: str, messages: list[dict], tools: list[dict] | None, cfg
+    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str
 ) -> dict:
     # OpenAI direct does not understand 'openai/' prefix or non-OpenAI models.
     if model.startswith("openai/"):
@@ -171,6 +188,7 @@ async def _call_openai(
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    _apply_max_tokens(body, tier)
     headers = {"Authorization": f"Bearer {cfg.openai.api_key}"}
     return await _post("openai", OPENAI_URL, body, headers)
 
@@ -209,10 +227,10 @@ async def call(
 
         try:
             if provider == "openrouter":
-                data = await _call_openrouter(primary_model, messages, tools, cfg)
+                data = await _call_openrouter(primary_model, messages, tools, cfg, tier)
                 model_used = data.get("model", primary_model)
             else:
-                data = await _call_openai(primary_model, messages, tools, cfg)
+                data = await _call_openai(primary_model, messages, tools, cfg, tier)
                 model_used = data.get("model", primary_model)
         except (httpx.HTTPStatusError, httpx.TransportError) as e:
             last_err = e
