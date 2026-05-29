@@ -16,13 +16,18 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from tars.scheduler.morning_briefing import morning_briefing
+from tars.scheduler.morning_briefing import morning_briefing_job
+from tars.scheduler.runtime import set_runtime
 
 log = logging.getLogger("tars.scheduler")
 
 
 def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
     """Build the AsyncIOScheduler. Caller is responsible for sched.start()."""
+    # Stash runtime singletons so jobs can look them up at fire time.
+    # Job functions must be parameter-free for SQLAlchemyJobStore pickling.
+    set_runtime(agent=agent, db=db, cfg=cfg)
+
     jobstores = {
         "default": SQLAlchemyJobStore(url=f"sqlite:///{cfg.paths.db}")
     }
@@ -37,11 +42,11 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
     )
 
     # 05:00 daily — the marquee feature. Configurable hour for testing.
+    # NO args — job_runner reads agent/db/cfg from scheduler.runtime.
     sched.add_job(
-        morning_briefing,
+        morning_briefing_job,
         CronTrigger(hour=5, minute=0, timezone=cfg.timezone),
         id="morning_briefing",
-        args=[agent, db, cfg],
         replace_existing=True,
         misfire_grace_time=900,  # 15 min for the briefing specifically
     )

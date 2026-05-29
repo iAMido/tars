@@ -92,8 +92,17 @@ PROMPT_TEMPLATE = (
 )
 
 
+async def morning_briefing_job() -> dict:
+    """The parameter-free wrapper APScheduler invokes. Reads runtime state
+    from the scheduler.runtime module so it can be pickled by the jobstore."""
+    from tars.scheduler.runtime import get_runtime
+    rt = get_runtime()
+    return await morning_briefing(rt.agent, rt.db, rt.cfg)
+
+
 async def morning_briefing(agent, db, cfg) -> dict:
-    """The job APScheduler calls. Returns a small summary dict for logging."""
+    """The actual briefing logic. Callable directly for manual triggers
+    (the `tars briefing` CLI subcommand)."""
     t0 = time.time()
     now = int(t0)
     today = datetime.fromtimestamp(t0).date().isoformat()
