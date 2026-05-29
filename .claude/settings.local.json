@@ -19,7 +19,15 @@
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 4: memory layer \\(Voyage embed/rerank + FTS5 + vec0 hybrid search\\) *)",
       "Bash(git -c user.email=idomosseri@gmail.com -c user.name=ido commit -m 'Phase 9a: deploy scripts + systemd unit + Linux config builder *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "mcp__mcp-registry__search_mcp_registry",
+      "Bash(npm --version)",
+      "Bash(npx --version)",
+      "Bash(ls -la \"C:\\\\Users\\\\ido\\\\tars\\\\.mcp.json\" \"C:\\\\Users\\\\reutn\\\\.claude.json\" \"C:\\\\Users\\\\reutn\\\\.claude\\\\settings.json\" 2>&1 | head -20)",
+      "Bash(python -c \"import json; c=json.load\\(open\\(r'C:\\\\\\\\Users\\\\\\\\reutn\\\\\\\\.claude.json'\\)\\); print\\('top-level keys:', list\\(c.keys\\(\\)\\)[:30]\\); print\\('has mcpServers:', 'mcpServers' in c\\); print\\('mcpServers content:', json.dumps\\(c.get\\('mcpServers', {}\\), indent=2\\)[:500]\\)\")",
+      "Bash(claude mcp *)",
+      "Bash(npm view *)",
+      "mcp__github__list_issues"
     ]
   }
 }
