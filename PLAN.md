@@ -18,6 +18,8 @@
 
 - **Phase 0–4 complete (local Windows dev)** — schema, config loader, LLM router with caps + cooldowns, Telegram bot via aiogram, hybrid memory search (FTS5 + vec0 + RRF + Voyage rerank). 31 unit tests green.
 - **Phase 9a complete (deploy)** — TARS now running 24/7 on Hetzner CPX22 Nuremberg under systemd (`tars.service`), polling Telegram from the tailnet, memory retrieval verified live. €11/mo all-in.
+- **Polish round complete** — Voice sharpened (FORBIDDEN patterns + few-shot examples), interactive_fast switched from gpt-5-mini (1500+ token essays, 7-60s) to DeepSeek V3.2 (terse, ~3-7s, ~10x cheaper). max_tokens cap per tier. Prefix caching kicks in (cached_tokens ~70% of prompt).
+- **Phase 5 complete** — Entity store with alias resolution (`OAI` → `OpenAI` proven live), follow-up lifecycle with citation-gated closure (open_followup/close_followup/list_followups tools), get_current_time tool, fire-and-forget entity extraction at cron_default tier after every save_note. 46 unit tests green. Tool loop bumped back to 4 to support 4-call chains.
 - Stuck on int8 vec_docs schema mismatch: voyageai 0.3.7 returns float32 regardless of `output_dtype="int8"`. Switched to `float[1024]`, lost the 4× space savings but unblocked indexing. Documented in commit 892a237.
 - Known polish item: TARS voice still too chatty (adds "Confirm if that's changed…" tails). Sharpen system prompt later.
 
