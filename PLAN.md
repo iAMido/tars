@@ -4,6 +4,16 @@
 
 ---
 
+## Dev environment
+
+- **GitHub MCP wired up.** `claude mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=... -- npx -y @modelcontextprotocol/server-github`. Registered for project scope `C:\Users\ido\tars` in `~/.claude.json`. Verify with `claude mcp list` — should show `github: ✓ Connected`. PAT is fine-grained, scoped only to `iAMido/tars`, 90-day expiry — regenerate when it expires.
+- After future Claude Code sessions restart, MCP tools like `mcp__github__list_issues`, `mcp__github__create_pull_request`, `mcp__github__get_file_contents` become available — agent can read/write the repo directly without copy-paste.
+
+## Outstanding TODOs (revisit before V1 sign-off)
+
+- [ ] **Rotate the 4 leaked API keys** (Telegram bot token, OpenRouter, OpenAI, Voyage). Keys were briefly visible in the deployment chat transcript. Mitigation in place: OpenAI/OpenRouter spend limits. Risk acceptable for now, must fix before V1 sign-off or before any sensitive data is ingested into the agent.
+- [ ] Sharpen TARS voice — system prompt still produces chatty "confirm if changed" tails on retrievals; should be terse/deadpan.
+
 ## Progress log
 
 - **Phase 0–4 complete (local Windows dev)** — schema, config loader, LLM router with caps + cooldowns, Telegram bot via aiogram, hybrid memory search (FTS5 + vec0 + RRF + Voyage rerank). 31 unit tests green.
