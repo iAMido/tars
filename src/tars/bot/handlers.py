@@ -25,9 +25,10 @@ import time
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatAction
 from aiogram.filters import BaseFilter, Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from tars.agent import Agent
+from tars.bot.actions import handle_callback as handle_action_callback
 from tars.config import Config
 from tars.tools import save_note as tool_save_note
 
@@ -383,6 +384,16 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         except Exception as e:  # noqa: BLE001
             log.exception("free chat failed")
             await m.answer(f"Failed: {e}")
+
+    # Inline-keyboard callback handler — must be gated to your chat_id too.
+    @dp.callback_query(F.data.startswith("b:"))
+    async def _action_cb(cq: CallbackQuery) -> None:
+        if cq.from_user is None or cq.from_user.id not in {
+            uid for uid in cfg.telegram.allowed_chat_ids
+        }:
+            await cq.answer("not authorized")
+            return
+        await handle_action_callback(cq, bot, agent, cfg)
 
     return dp, bot
 

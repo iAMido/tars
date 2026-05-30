@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,36 @@ from tars.integrations.gmail import fetch_unread_since
 from tars.memory.follow_ups import list_open
 
 log = logging.getLogger("tars.scheduler.morning_briefing")
+
+# Matches a markdown numbered-list line: "1. <text>"  (>=1 chars)
+_SUGGESTION_LINE_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
+
+
+def _extract_suggestions(briefing_text: str) -> list[str]:
+    """Walk lines, find the *Suggestions* section, return each numbered item's text.
+
+    Robust to a few format wobbles: header may be `*Suggestions*`, `**Suggestions**`,
+    or `# Suggestions`. The section ends at the next header (`*Xxx*` or `**Xxx**`
+    on a line by itself) or at end of text.
+    """
+    lines = briefing_text.splitlines()
+    in_section = False
+    items: list[str] = []
+    header_re = re.compile(r"^\s*(?:\*+|#+)\s*\w[\w\s-]*\*+?\s*$")
+    suggestions_re = re.compile(r"^\s*(?:\*+|#+)\s*Suggestions?\s*\*+?\s*$", re.IGNORECASE)
+    for raw in lines:
+        if not in_section:
+            if suggestions_re.match(raw):
+                in_section = True
+            continue
+        # In section: stop on a new header.
+        if header_re.match(raw) and not suggestions_re.match(raw):
+            break
+        m = _SUGGESTION_LINE_RE.match(raw)
+        if m:
+            items.append(m.group(2))
+    log.info("morning_briefing: parsed %d suggestion(s) from output", len(items))
+    return items
 
 OVERNIGHT_HOURS = 12
 CAL_LOOKAHEAD = 5
@@ -126,10 +157,13 @@ PROMPT_TEMPLATE = (
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
     "These are NOT things you (TARS) are doing — just things the user could ask "
     "you to do. Format as a numbered list, plain language. No verb prefixes like "
-    "'Reply:' or 'note:' or 'remind me to'. Just describe the opportunity:\n"
-    "  1. Open a Portuguese Revolut local account (Revolut email mentioned this would smooth cross-border payments)\n"
-    "  2. Reply to Sarah re Q3 budget — she's asking for confirmation by Thursday\n"
-    "  3. Read Globerman's piece this weekend\n"
+    "'Reply:' or 'note:' or 'remind me to'.\n"
+    "End each suggestion line with the hashtag `#briefing-{today}` so the user "
+    "can copy any line into a note and the hashtag survives into Obsidian for "
+    "later filtering. Example:\n"
+    "  1. Open a Portuguese Revolut local account — Revolut email mentioned smoother cross-border payments #briefing-{today}\n"
+    "  2. Reply to Sarah re Q3 budget — she's asking by Thursday #briefing-{today}\n"
+    "  3. Read Globerman's piece this weekend #briefing-{today}\n"
     "\n"
     "FILTER STRICTLY. Include only items that:\n"
     "  - Require an actual decision, reply, or time-sensitive action from the user\n"
@@ -138,12 +172,12 @@ PROMPT_TEMPLATE = (
     "  - Log/archive/track a receipt (\"Wolt receipt 316.90\" — NOT a suggestion)\n"
     "  - Fill out routine forms (\"daily activity tracker\" — too noisy)\n"
     "  - Newsletters / promotional content / one-way notifications\n"
-    "  - Reminders to read/check generic content\n"
+    "  - Reminders to read/check generic content unless the user explicitly cares\n"
     "  - Anything the user obviously already knows or has handled\n"
     "If after filtering there are zero items worth suggesting, OMIT the entire "
     "*Suggestions* section. Better silent than noisy.\n"
     "After the list (only if any items): one final line exactly:\n"
-    "  `Reply with what you want me to do — e.g. 'note: X' to save, 'remind me to X' to schedule, 'reply to <person>' for help drafting.`\n"
+    "  `Reply with what you want me to do — e.g. 'note: <copy line here>' to save (hashtag included), 'remind me to X' to schedule.`\n"
     "\n"
     "*Warnings* — one line per warning, terse.\n"
     "\n"
@@ -190,7 +224,10 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     out = await agent.chat(
         thread_key="job:morning_briefing",
-        user_text=PROMPT_TEMPLATE.format(payload=json.dumps(payload, default=str, indent=2)),
+        user_text=PROMPT_TEMPLATE.format(
+            today=today,
+            payload=json.dumps(payload, default=str, indent=2),
+        ),
         tier="cron_default",
     )
     text = out["text"].strip() or "(briefing empty)"
@@ -209,14 +246,28 @@ async def morning_briefing(agent, db, cfg) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("vault briefing mirror failed: %s", e)
 
+    # Pull suggestion lines out so we can attach an inline keyboard to each.
+    suggestion_texts = _extract_suggestions(text)
+
     # Send to each allowed chat. Open a fresh Bot session so this is independent
     # of the long-polling bot lifecycle.
+    from tars.bot.actions import build_suggestion_keyboard, create_pending
+
     bot = Bot(token=cfg.telegram.bot_token)
     sent = 0
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
-                await bot.send_message(chat_id, text)
+                if suggestion_texts:
+                    pending_ids = await create_pending(
+                        db, chat_id=chat_id,
+                        suggestions=[{"text": s} for s in suggestion_texts],
+                        briefing_date=today,
+                    )
+                    kb = build_suggestion_keyboard(pending_ids)
+                    await bot.send_message(chat_id, text, reply_markup=kb)
+                else:
+                    await bot.send_message(chat_id, text)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("morning_briefing: send_message to %s failed (%s)", chat_id, e)
