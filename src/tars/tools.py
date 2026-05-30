@@ -96,6 +96,40 @@ async def save_note(db, args: dict[str, Any]) -> str:
     return json.dumps({"ok": True, "note_id": note_id})
 
 
+async def get_note(db, args: dict[str, Any]) -> str:
+    """Fetch a single note by its exact id."""
+    try:
+        nid = int(args.get("note_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return json.dumps({"error": "get_note requires integer note_id"})
+    row = await db.fetch_one(
+        "SELECT id, datetime(created_at,'unixepoch','localtime') AS created, "
+        "       source, status, body, tags, closes_note_id, "
+        "       datetime(closed_at,'unixepoch','localtime') AS closed_at "
+        "FROM notes WHERE id = ?",
+        (nid,),
+    )
+    if row is None:
+        return json.dumps({"error": f"note #{nid} does not exist"})
+    try:
+        tags = json.loads(row["tags"] or "[]")
+    except json.JSONDecodeError:
+        tags = []
+    return json.dumps(
+        {
+            "id": int(row["id"]),
+            "created": row["created"],
+            "source": row["source"],
+            "status": row["status"],
+            "body": row["body"],
+            "tags": tags,
+            "closes_note_id": row["closes_note_id"],
+            "closed_at": row["closed_at"],
+        },
+        ensure_ascii=False,
+    )
+
+
 async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
     query = (args.get("query") or "").strip()
     if not query:
@@ -193,6 +227,7 @@ async def web_research(db, args: dict[str, Any]) -> str:
 
 TOOL_REGISTRY = {
     "save_note": save_note,
+    "get_note": get_note,
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,
