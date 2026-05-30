@@ -52,17 +52,54 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 
+def _clean_tag(t: str) -> str:
+    """Obsidian frontmatter tags should NOT include `#` and should use `/`
+    for hierarchy (not `-`). Strip the `#`, normalize whitespace, lowercase
+    the alphabetic parts (dates stay numeric)."""
+    s = (t or "").strip().lstrip("#").strip()
+    return s
+
+
 def _frontmatter(fields: dict) -> str:
-    """Minimal YAML frontmatter. Not a full YAML serializer; covers the
-    primitives we use (str, int, list[str], list[int]). Obsidian parses it."""
-    def _emit(v):
-        if isinstance(v, list):
-            inner = ", ".join(json.dumps(x, ensure_ascii=False) for x in v)
-            return f"[{inner}]"
+    """Minimal YAML frontmatter compatible with Obsidian Properties.
+
+    Quirks Obsidian cares about:
+      - `tags:` must be a YAML list. NO `#` prefix in frontmatter — Obsidian
+        renders tags from frontmatter without it; including `#` shows literal `#`.
+      - `aliases:` is a list of alternative note names — useful for [[wikilinks]].
+      - Other keys become Properties in Obsidian's new Properties pane.
+    """
+    def _emit_scalar(v):
         if isinstance(v, (int, float)):
             return str(v)
         return json.dumps(str(v), ensure_ascii=False)
-    body = "\n".join(f"{k}: {_emit(v)}" for k, v in fields.items())
+
+    def _emit_list(items):
+        if not items:
+            return "[]"
+        # Block-style list is friendlier for Obsidian's Properties UI than inline.
+        return "\n" + "\n".join(f"  - {json.dumps(x, ensure_ascii=False)}" for x in items)
+
+    lines: list[str] = []
+    for k, v in fields.items():
+        if k == "tags" and isinstance(v, list):
+            # Dedup while preserving order so repeated tags don't appear twice.
+            seen: set[str] = set()
+            cleaned: list[str] = []
+            for t in v:
+                c = _clean_tag(t)
+                if c and c not in seen:
+                    seen.add(c)
+                    cleaned.append(c)
+            lines.append(f"tags:{_emit_list(cleaned)}")
+        elif k == "aliases" and isinstance(v, list):
+            lines.append(f"aliases:{_emit_list(v)}")
+        elif isinstance(v, list):
+            inner = ", ".join(json.dumps(x, ensure_ascii=False) for x in v)
+            lines.append(f"{k}: [{inner}]")
+        else:
+            lines.append(f"{k}: {_emit_scalar(v)}")
+    body = "\n".join(lines)
     return f"---\n{body}\n---\n"
 
 

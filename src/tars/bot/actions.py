@@ -51,9 +51,13 @@ async def create_pending(
     ids: list[int] = []
     now = int(time.time())
     for s in suggestions:
+        # Obsidian best-practice tags: hierarchical with /, no # prefix in
+        # frontmatter. The inline #briefing/<date> in the body (from the LLM)
+        # plus these frontmatter tags both render cleanly in Obsidian.
         extra = json.dumps({
             "briefing_date": briefing_date,
-            "hashtag": f"#briefing-{briefing_date}",
+            "hashtag": f"#briefing/{briefing_date}",
+            "frontmatter_tags": ["briefing", f"briefing/{briefing_date}", "source/suggestion"],
         })
         cur = await db.execute(
             "INSERT INTO pending_actions("
@@ -100,10 +104,8 @@ async def handle_callback(callback, bot: Bot, agent, cfg) -> None:
         extra = json.loads(row["extra"] or "{}")
     except json.JSONDecodeError:
         extra = {}
-    hashtag = extra.get("hashtag", "")
-    tags = ["briefing"]
-    if hashtag:
-        tags.append(hashtag)
+    # Obsidian-clean tags from the extra payload (no `#` prefix, hierarchical).
+    tags = extra.get("frontmatter_tags") or ["briefing"]
 
     status_text = ""
     result_payload: dict = {}
