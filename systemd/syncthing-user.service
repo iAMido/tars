@@ -1,0 +1,19 @@
+[Unit]
+Description=Syncthing - Open Source Continuous File Synchronization (user)
+Documentation=https://docs.syncthing.net
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/syncthing serve --no-browser --no-restart --logflags=0
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=3 4
+RestartForceExitStatus=3 4
+# Lighter sandboxing than tars.service; Syncthing manages its own paths.
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
