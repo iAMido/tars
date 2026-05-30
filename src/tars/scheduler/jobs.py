@@ -19,10 +19,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from tars.scheduler.brain_reindex import brain_reindex_job
 from tars.scheduler.calendar_pull import calendar_pull_job
+from tars.scheduler.competitive_intel_scan import competitive_intel_scan_job
 from tars.scheduler.cooldown_clear import cooldown_clear_job
 from tars.scheduler.cost_rollup_daily import cost_rollup_daily_job
 from tars.scheduler.email_summary import email_summary_job
 from tars.scheduler.morning_briefing import morning_briefing_job
+from tars.scheduler.news_sources_refresh import news_sources_refresh_job
 from tars.scheduler.runtime import set_runtime
 from tars.scheduler.vault_sweep import vault_sweep_job
 from tars.scheduler.weekly_followup_reconcile import weekly_followup_reconcile_job
@@ -113,6 +115,24 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
         vault_sweep_job,
         IntervalTrigger(minutes=10),
         id="vault_sweep",
+        replace_existing=True,
+    )
+
+    # Hourly — refresh all kind='news' feeds. Silent (no Telegram); just
+    # populates feed_items which brain_reindex picks up on its next run.
+    sched.add_job(
+        news_sources_refresh_job,
+        IntervalTrigger(hours=1),
+        id="news_sources_refresh",
+        replace_existing=True,
+    )
+
+    # 09:00, 13:00, 17:00 — refresh competitive feeds, summarize new items,
+    # ping Telegram. Silent if no new items since last fire.
+    sched.add_job(
+        competitive_intel_scan_job,
+        CronTrigger(hour="9,13,17", minute=0, timezone=cfg.timezone),
+        id="competitive_intel_scan",
         replace_existing=True,
     )
 

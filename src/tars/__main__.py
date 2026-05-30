@@ -158,6 +158,12 @@ async def _cmd_job(name: str) -> int:
         elif name == "vault_sweep":
             from tars.scheduler.vault_sweep import vault_sweep
             summary = await vault_sweep(db, cfg)
+        elif name == "news_sources_refresh":
+            from tars.scheduler.news_sources_refresh import news_sources_refresh
+            summary = await news_sources_refresh(db, cfg)
+        elif name == "competitive_intel_scan":
+            from tars.scheduler.competitive_intel_scan import competitive_intel_scan
+            summary = await competitive_intel_scan(agent, db, cfg)
         else:
             log.error("unknown job: %s", name)
             return 2
@@ -280,8 +286,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "cooldown_clear",
             "cost_rollup_daily",
             "vault_sweep",
+            "news_sources_refresh",
+            "competitive_intel_scan",
         ],
     )
+
+    pfeeds = sub.add_parser("feeds", help="Manage RSS feeds (list / add).")
+    fsub = pfeeds.add_subparsers(dest="feeds_cmd")
+    fsub.add_parser("list", help="List all feeds")
+    padd = fsub.add_parser("add", help="Add a feed")
+    padd.add_argument("--name", required=True)
+    padd.add_argument("--url", required=True)
+    padd.add_argument("--kind", default="news", choices=["news", "competitive"])
+    padd.add_argument("--notes", default=None)
 
     return p
 
@@ -302,7 +319,33 @@ def main() -> int:
         return asyncio.run(_cmd_briefing())
     if args.cmd == "job":
         return asyncio.run(_cmd_job(args.name))
+    if args.cmd == "feeds":
+        return asyncio.run(_cmd_feeds(args))
     return 1
+
+
+async def _cmd_feeds(args) -> int:
+    from tars.integrations.news import add_feed, list_feeds
+    cfg = load_config()
+    db = await Database.connect(cfg.paths.db)
+    try:
+        await db.migrate()
+        if args.feeds_cmd == "list":
+            for f in await list_feeds(db, enabled_only=False):
+                print(
+                    f"#{f['id']:3d} [{f['kind']:11s}] "
+                    f"{'on ' if f['enabled'] else 'off'} "
+                    f"{f['name']!r:<30} {f['feed_url']}"
+                )
+            return 0
+        if args.feeds_cmd == "add":
+            fid = await add_feed(db, args.name, args.url, kind=args.kind, notes=args.notes)
+            print(f"added feed #{fid}: {args.name} ({args.kind})")
+            return 0
+        print("usage: tars feeds {list|add ...}")
+        return 1
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":

@@ -121,6 +121,36 @@ async def _collect_documents(db: Database) -> list[dict]:
             }
         )
 
+    # --- feed items (news + competitive intel) ---
+    # Wrapped in try so a missing migration doesn't break the indexer.
+    try:
+        rows = await db.fetch_all(
+            "SELECT fi.id, fi.title, fi.summary, fi.url, f.name AS feed_name, f.kind "
+            "FROM feed_items fi JOIN feeds f ON f.id = fi.feed_id "
+            "ORDER BY fi.id"
+        )
+        for r in rows:
+            title = (r["title"] or "").strip()
+            summary = (r["summary"] or "").strip()
+            url = (r["url"] or "").strip()
+            if not title and not summary:
+                continue
+            body = f"{title}\n\n{summary}".strip()
+            if url:
+                body = f"{body}\n\n{url}"
+            docs.append(
+                {
+                    "source": "feed",
+                    "source_ref": str(r["id"]),
+                    "title": f"[{r['kind']}] {r['feed_name']}: {title[:60]}",
+                    "body": body,
+                    "tags": f'["{r["kind"]}", "{r["feed_name"]}"]',
+                }
+            )
+    except Exception:  # noqa: BLE001
+        # feeds table may not yet exist on a fresh DB before migration 007.
+        pass
+
     return docs
 
 
