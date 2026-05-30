@@ -28,7 +28,10 @@ from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from tars.agent import Agent
-from tars.bot.actions import handle_callback as handle_action_callback
+from tars.bot.actions import (
+    handle_callback as handle_action_callback,
+    handle_custom_remind_reply,
+)
 from tars.config import Config
 from tars.tools import save_note as tool_save_note
 
@@ -363,6 +366,13 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
 
     @dp.message(F.text, auth)
     async def _free_chat(m: Message) -> None:
+        # Hand-off check first: is this a reply to a "When?" prompt we sent?
+        try:
+            if await handle_custom_remind_reply(m, agent, cfg):
+                return
+        except Exception as e:  # noqa: BLE001
+            log.exception("custom-remind reply handler failed (%s); falling through", e)
+
         thread_key = f"tg:{m.chat.id}"
         try:
             out = await _with_typing(
