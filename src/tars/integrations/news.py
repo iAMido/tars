@@ -108,6 +108,27 @@ async def add_feed(db, name: str, feed_url: str, kind: str = "news",
     return int(row["id"]) if row else 0
 
 
+async def remove_feed(db, feed_id: int) -> bool:
+    """Hard-delete a feed and all its items. Returns True if a row was removed."""
+    row = await db.fetch_one("SELECT id FROM feeds WHERE id = ?", (int(feed_id),))
+    if row is None:
+        return False
+    await db.execute("DELETE FROM feed_items WHERE feed_id = ?", (int(feed_id),))
+    await db.execute("DELETE FROM feeds WHERE id = ?", (int(feed_id),))
+    return True
+
+
+async def set_feed_enabled(db, feed_id: int, enabled: bool) -> bool:
+    row = await db.fetch_one("SELECT id FROM feeds WHERE id = ?", (int(feed_id),))
+    if row is None:
+        return False
+    await db.execute(
+        "UPDATE feeds SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, int(feed_id)),
+    )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Refresh a single feed
 # ---------------------------------------------------------------------------

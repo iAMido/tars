@@ -133,6 +133,107 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         # V1.1 will wire this to a per-thread setting; for now it's stub.
         await m.answer("Voice control is queued for V1.1. Text-only for now.")
 
+    @dp.message(Command("feeds"), auth)
+    async def _feeds(m: Message) -> None:
+        """Manage RSS feeds from Telegram.
+
+        Usage:
+          /feeds                                  → list all feeds
+          /feeds add news <name> <url>            → add a news feed
+          /feeds add competitive <name> <url>     → add a competitive feed
+          /feeds remove <id>                      → hard-delete a feed
+          /feeds disable <id>                     → keep but stop fetching
+          /feeds enable <id>                      → re-enable
+        Names with spaces: wrap in double quotes.
+        """
+        import shlex
+        from tars.integrations.news import (
+            add_feed, list_feeds, refresh_feed, remove_feed, set_feed_enabled,
+        )
+
+        text = (m.text or "").removeprefix("/feeds").strip()
+        try:
+            parts = shlex.split(text) if text else []
+        except ValueError as e:
+            await m.answer(f"parse error: {e}")
+            return
+
+        # default: list
+        if not parts:
+            feeds = await list_feeds(agent.db, enabled_only=False)
+            if not feeds:
+                await m.answer("No feeds yet. Add one:\n`/feeds add news \"Hacker News\" https://news.ycombinator.com/rss`", parse_mode="Markdown")
+                return
+            lines = ["*Feeds*"]
+            for f in feeds:
+                status = "✓" if f["enabled"] else "✗"
+                lines.append(
+                    f"`#{f['id']}` {status} [{f['kind']}] *{f['name']}*\n   {f['feed_url']}"
+                )
+            lines.append("\n`/feeds add news|competitive <name> <url>`\n`/feeds remove|enable|disable <id>`")
+            await m.answer("\n".join(lines), parse_mode="Markdown",
+                           disable_web_page_preview=True)
+            return
+
+        cmd = parts[0].lower()
+
+        if cmd == "add":
+            if len(parts) < 4 or parts[1] not in ("news", "competitive"):
+                await m.answer(
+                    "Usage: `/feeds add news|competitive \"<name>\" <url>`",
+                    parse_mode="Markdown",
+                )
+                return
+            kind = parts[1]
+            name = parts[2]
+            url = parts[3]
+            fid = await add_feed(agent.db, name=name, feed_url=url, kind=kind)
+            # Try one immediate refresh so the user sees if the URL works.
+            try:
+                feed_row = await agent.db.fetch_one(
+                    "SELECT id, name, feed_url, last_seen_guid FROM feeds WHERE id = ?",
+                    (fid,),
+                )
+                new = await refresh_feed(agent.db, dict(feed_row))
+                await m.answer(
+                    f"Added feed `#{fid}` [{kind}] *{name}*.\nFirst fetch: {len(new)} items.",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:  # noqa: BLE001
+                await m.answer(
+                    f"Added feed `#{fid}` but first fetch failed: `{e}`\n"
+                    f"Check the URL — leave it enabled to retry on the next schedule.",
+                    parse_mode="Markdown",
+                )
+            return
+
+        if cmd in ("remove", "delete", "rm"):
+            if len(parts) < 2 or not parts[1].isdigit():
+                await m.answer("Usage: `/feeds remove <id>`", parse_mode="Markdown")
+                return
+            ok = await remove_feed(agent.db, int(parts[1]))
+            await m.answer(f"{'Removed' if ok else 'Not found'} feed `#{parts[1]}`.",
+                           parse_mode="Markdown")
+            return
+
+        if cmd in ("enable", "disable"):
+            if len(parts) < 2 or not parts[1].isdigit():
+                await m.answer(f"Usage: `/feeds {cmd} <id>`", parse_mode="Markdown")
+                return
+            ok = await set_feed_enabled(agent.db, int(parts[1]), cmd == "enable")
+            await m.answer(
+                f"{'Enabled' if cmd == 'enable' else 'Disabled'} feed `#{parts[1]}` "
+                f"{'(was missing)' if not ok else ''}".strip(),
+                parse_mode="Markdown",
+            )
+            return
+
+        await m.answer(
+            "Commands: `/feeds`, `/feeds add news|competitive \"<name>\" <url>`, "
+            "`/feeds remove|enable|disable <id>`",
+            parse_mode="Markdown",
+        )
+
     @dp.message(Command("clear"), auth)
     async def _clear(m: Message) -> None:
         """Wipe conversation history for this chat (but keep notes, follow-ups, ledger)."""

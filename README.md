@@ -97,6 +97,97 @@ git push
 ssh tars-vps "cd ~/tars && git pull && ~/.local/bin/uv sync --frozen && sudo systemctl restart tars && sleep 4 && systemctl status tars --no-pager | head -8"
 ```
 
+### Manage RSS feeds (news + competitive intel)
+
+Two scheduled jobs read from the same `feeds` table:
+
+- **`news_sources_refresh`** (hourly) — fetches every `kind=news` feed, stores new
+  items in `feed_items`. Silent. Items get embedded into `brain_docs` by
+  `brain_reindex` and become searchable via `search_memory`. Used for general
+  background knowledge — Hacker News, blogs you skim, etc.
+- **`competitive_intel_scan`** (09:00 / 13:00 / 17:00) — fetches every
+  `kind=competitive` feed. Anything new since the last fire gets composed into
+  a Telegram message in TARS voice. Used for things you actively want to be
+  pinged about — competitors, partners, GitHub release feeds of dependencies.
+
+#### Add / remove feeds — three ways
+
+**From Telegram (easiest, works from your phone):**
+
+```
+/feeds                                         → list everything
+/feeds add news "Hacker News" https://news.ycombinator.com/rss
+/feeds add competitive "Anthropic SDK" https://github.com/anthropics/anthropic-sdk-python/releases.atom
+/feeds remove 3                                → hard-delete feed #3
+/feeds disable 3                               → keep history but stop fetching
+/feeds enable 3                                → resume
+```
+
+Names containing spaces must be in `"double quotes"`. The bot does an immediate
+fetch when you add a feed so you see right away if the URL is bad.
+
+**From the CLI (for scripting, batch ops):**
+
+```bash
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars feeds list"
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars feeds add --name 'HN' --url 'https://news.ycombinator.com/rss' --kind news"
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars feeds remove 3"
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars feeds disable 3"
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars feeds enable 3"
+```
+
+**Direct SQL (last-resort surgery):**
+
+```bash
+"UPDATE feeds SET enabled = 0 WHERE id = 3;" | ssh tars-vps "sqlite3 ~/.tars/tars.db"
+```
+
+#### Finding feed URLs that work
+
+Reliable, parser-friendly feed sources:
+
+| Source pattern | Example | Notes |
+|---|---|---|
+| GitHub releases | `https://github.com/<owner>/<repo>/releases.atom` | Bulletproof. Use to track SDKs, projects, tools you depend on. |
+| GitHub commits | `https://github.com/<owner>/<repo>/commits/main.atom` | Noisier — every commit. |
+| Substack | `https://<sub>.substack.com/feed` | Most newsletters expose this. |
+| WordPress | `https://<site>/feed/` | The default WP RSS path. |
+| Hacker News front page | `https://news.ycombinator.com/rss` | High volume, low signal — useful as ambient brain food. |
+| Lobsters | `https://lobste.rs/rss` | Lower volume than HN. |
+| Reddit subreddit | `https://www.reddit.com/r/<sub>/.rss` | Works for low-traffic subs. |
+| Atom feeds (anything ending in `.atom` or `.xml`) | varies | feedparser handles both RSS and Atom transparently. |
+
+**Avoid:**
+- Mastodon `/api/v1/timelines/*` endpoints (JSON, not RSS — would need a separate integration)
+- Sites with JavaScript-only feeds
+- OpenAI's blog at `/blog/rss/` — currently returns malformed XML (Nov 2026)
+
+#### Force an immediate fetch
+
+To pull new items now without waiting for the schedule:
+
+```bash
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars job news_sources_refresh"
+ssh tars-vps "cd ~/tars && ~/.local/bin/uv run python -m tars job competitive_intel_scan"
+```
+
+The `competitive_intel_scan` will Telegram-push if it finds new items.
+
+#### How feeds flow through TARS
+
+```
+1. Schedule fires (hourly news / 9-13-17 competitive)
+2. feedparser fetches the URL (asyncio.to_thread so the bot doesn't block)
+3. New entries (not seen since last_seen_guid) inserted into feed_items
+4. competitive_intel_scan additionally composes a Telegram message
+5. brain_reindex (every 15m, diff mode) picks up new feed_items and embeds them
+6. search_memory now includes them — ask the bot "what's new with X" and the
+   RAG hybrid search (FTS5 + vec0) returns matching feed_items with citations
+```
+
+So even silent news feeds end up improving the bot's answers within ~30 min of
+being added.
+
 ### Update API keys
 
 ```powershell

@@ -303,7 +303,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ],
     )
 
-    pfeeds = sub.add_parser("feeds", help="Manage RSS feeds (list / add).")
+    pfeeds = sub.add_parser("feeds", help="Manage RSS feeds (list / add / remove / enable / disable).")
     fsub = pfeeds.add_subparsers(dest="feeds_cmd")
     fsub.add_parser("list", help="List all feeds")
     padd = fsub.add_parser("add", help="Add a feed")
@@ -311,6 +311,12 @@ def _build_parser() -> argparse.ArgumentParser:
     padd.add_argument("--url", required=True)
     padd.add_argument("--kind", default="news", choices=["news", "competitive"])
     padd.add_argument("--notes", default=None)
+    prm = fsub.add_parser("remove", help="Hard-delete a feed and all its items")
+    prm.add_argument("id", type=int)
+    pen = fsub.add_parser("enable", help="Enable a feed")
+    pen.add_argument("id", type=int)
+    pdi = fsub.add_parser("disable", help="Disable a feed (keeps history)")
+    pdi.add_argument("id", type=int)
 
     return p
 
@@ -337,13 +343,17 @@ def main() -> int:
 
 
 async def _cmd_feeds(args) -> int:
-    from tars.integrations.news import add_feed, list_feeds
+    from tars.integrations.news import add_feed, list_feeds, remove_feed, set_feed_enabled
     cfg = load_config()
     db = await Database.connect(cfg.paths.db)
     try:
         await db.migrate()
         if args.feeds_cmd == "list":
-            for f in await list_feeds(db, enabled_only=False):
+            feeds = await list_feeds(db, enabled_only=False)
+            if not feeds:
+                print("no feeds. add one with: tars feeds add --name X --url Y --kind news|competitive")
+                return 0
+            for f in feeds:
                 print(
                     f"#{f['id']:3d} [{f['kind']:11s}] "
                     f"{'on ' if f['enabled'] else 'off'} "
@@ -354,7 +364,19 @@ async def _cmd_feeds(args) -> int:
             fid = await add_feed(db, args.name, args.url, kind=args.kind, notes=args.notes)
             print(f"added feed #{fid}: {args.name} ({args.kind})")
             return 0
-        print("usage: tars feeds {list|add ...}")
+        if args.feeds_cmd == "remove":
+            ok = await remove_feed(db, args.id)
+            print(f"{'removed' if ok else 'not found'}: feed #{args.id}")
+            return 0 if ok else 2
+        if args.feeds_cmd == "enable":
+            ok = await set_feed_enabled(db, args.id, True)
+            print(f"{'enabled' if ok else 'not found'}: feed #{args.id}")
+            return 0 if ok else 2
+        if args.feeds_cmd == "disable":
+            ok = await set_feed_enabled(db, args.id, False)
+            print(f"{'disabled' if ok else 'not found'}: feed #{args.id}")
+            return 0 if ok else 2
+        print("usage: tars feeds {list|add|remove|enable|disable ...}")
         return 1
     finally:
         await db.close()

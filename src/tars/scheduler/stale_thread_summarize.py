@@ -47,12 +47,15 @@ async def stale_thread_summarize(agent, db, cfg) -> dict:
     cutoff = now - STALE_DAYS * 86400
 
     # Conversations with last activity older than cutoff AND not already archived.
+    # HAVING requires GROUP BY in SQLite — wrap the per-thread aggregates in a
+    # subquery and filter in WHERE.
     rows = await db.fetch_all(
-        "SELECT c.thread_key, "
-        " (SELECT MAX(ts) FROM messages m WHERE m.thread_key = c.thread_key) AS last_ts, "
-        " (SELECT COUNT(*) FROM messages m WHERE m.thread_key = c.thread_key) AS msg_count "
-        "FROM conversations c "
-        "HAVING last_ts IS NOT NULL AND last_ts < ?",
+        "SELECT thread_key, last_ts, msg_count FROM ("
+        "  SELECT c.thread_key,"
+        "    (SELECT MAX(ts) FROM messages m WHERE m.thread_key = c.thread_key) AS last_ts,"
+        "    (SELECT COUNT(*) FROM messages m WHERE m.thread_key = c.thread_key) AS msg_count"
+        "  FROM conversations c"
+        ") WHERE last_ts IS NOT NULL AND last_ts < ?",
         (cutoff,),
     )
 
