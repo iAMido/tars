@@ -193,8 +193,11 @@ async def handle_callback(callback, bot: Bot, agent, cfg) -> None:
 
 async def handle_custom_remind_reply(message, agent, cfg) -> bool:
     """If the user's message is a reply to one of our "When?" prompts, parse
-    the time and create the follow-up. Returns True if handled (so the bot's
-    free-chat handler skips it)."""
+    the time deterministically (dateparser) and create the follow-up directly.
+    No LLM in the loop — LLM call had hallucination risk (would pull adjacent
+    notes via search_memory and answer about the wrong subject).
+
+    Returns True if handled (so the bot's free-chat handler skips it)."""
     if message.reply_to_message is None:
         return False
     prompt_msg_id = message.reply_to_message.message_id
@@ -214,37 +217,76 @@ async def handle_custom_remind_reply(message, agent, cfg) -> bool:
     except json.JSONDecodeError:
         extra = {}
     tags = extra.get("frontmatter_tags") or ["briefing"]
-
     user_time = (message.text or "").strip()
 
-    # Save the note first.
+    # Parse the time string deterministically.
+    import dateparser  # local import to avoid top-level cost when unused
+    tz = ZoneInfo(cfg.timezone)
+    dt = dateparser.parse(
+        user_time,
+        settings={
+            "TIMEZONE": cfg.timezone,
+            "TO_TIMEZONE": cfg.timezone,
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    if dt is None:
+        await message.reply(
+            f"Couldn't parse `{user_time}` as a time. Try `tomorrow 3pm`, "
+            f"`in 2 hours`, `next Monday 9am`, or `2026-06-15 14:00`.\n"
+            f"Reply to the same prompt to try again.",
+            parse_mode="Markdown",
+        )
+        return True  # we did handle it (asked for retry)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+
+    # Refuse past times (off by >5min — gives small tolerance for clock skew).
+    now_dt = datetime.now(tz)
+    if (now_dt - dt).total_seconds() > 300:
+        await message.reply(
+            f"`{user_time}` resolves to {dt.strftime('%a %Y-%m-%d %H:%M')} which is in the past. "
+            f"Reply with a future time.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    # Save the suggestion as a note (with the briefing frontmatter tags).
     r = json.loads(await tool_save_note(agent.db, {"body": suggestion_text, "tags": tags}))
     note_id = r.get("note_id")
 
-    # Now route the time string through the Agent so it handles natural language
-    # via get_current_time + open_followup tools (already wired). Reuse the
-    # job:morning_briefing thread so this conversation has cache context.
-    user_prompt = (
-        f"Set a reminder for note_id={note_id} (\"{suggestion_text[:120]}\") "
-        f"at: {user_time}. Use get_current_time to interpret the time, then "
-        f"call open_followup with note_id={note_id} and the ISO due time. "
-        f"Reply with only: 'Reminder set <due_human>. [followup:<id>]'."
-    )
-    out = await agent.chat(
-        thread_key=f"job:custom_remind:{sid}",
-        user_text=user_prompt,
-        tier="cron_default",
-    )
+    # Open the follow-up.
+    try:
+        fu_id = await open_followup(
+            agent.db, note_id=int(note_id),
+            due_at_iso=dt.isoformat(timespec="seconds"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("custom_remind: open_followup failed (%s)", e)
+        await message.reply(f"Couldn't set reminder: {e}")
+        return True
 
     # Mark consumed.
     await agent.db.execute(
         "UPDATE pending_actions SET consumed_at = ?, consumed_action = ?, "
         " consumed_result = ? WHERE id = ?",
-        (int(time.time()), "rc",
-         json.dumps({"note_id": note_id, "user_time": user_time}), sid),
+        (
+            int(time.time()), "rc",
+            json.dumps({
+                "note_id": note_id, "followup_id": fu_id,
+                "user_time": user_time, "resolved_iso": dt.isoformat(),
+            }),
+            sid,
+        ),
     )
 
-    await message.reply(out["text"] or "Reminder noted.")
+    due_human = dt.strftime("%a %Y-%m-%d %H:%M")
+    preview = suggestion_text[:60] + ("…" if len(suggestion_text) > 60 else "")
+    await message.reply(
+        f"✓ Reminder set {due_human} for: _{preview}_\n[note:{note_id}] [followup:{fu_id}]",
+        parse_mode="Markdown",
+    )
     return True
 
 
