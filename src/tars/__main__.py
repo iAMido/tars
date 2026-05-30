@@ -89,6 +89,22 @@ async def _cmd_chat(text: str, tier: str, thread: str) -> int:
         await db.close()
 
 
+async def _cmd_vault_backfill() -> int:
+    """Walk the DB and emit every note + briefing + follow-up list to the vault."""
+    from tars.integrations.vault import backfill_from_db
+
+    log.info("TARS %s vault-backfill", __version__)
+    cfg = load_config()
+    db = await Database.connect(cfg.paths.db)
+    try:
+        await db.migrate()
+        summary = await backfill_from_db(db, cfg)
+        log.info("vault backfill: %s", summary)
+        return 0
+    finally:
+        await db.close()
+
+
 async def _cmd_reindex() -> int:
     """Phase 4: full reindex of brain_docs + vec_docs."""
     from tars.memory.embed import Embedder
@@ -240,6 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bot", help="Run the Telegram bot (long polling). Ctrl+C to stop.")
     sub.add_parser("reindex", help="Rebuild FTS5 + vec0 indices from notes/messages/briefings.")
+    sub.add_parser("vault-backfill", help="Emit all notes/briefings/follow-ups as markdown files under cfg.paths.vault.")
     sub.add_parser("briefing", help="Manually run the morning briefing once (alias for `job morning_briefing`).")
 
     pjob = sub.add_parser("job", help="Manually trigger a scheduler job by name.")
@@ -267,6 +284,8 @@ def main() -> int:
         return asyncio.run(_cmd_bot())
     if args.cmd == "reindex":
         return asyncio.run(_cmd_reindex())
+    if args.cmd == "vault-backfill":
+        return asyncio.run(_cmd_vault_backfill())
     if args.cmd == "briefing":
         return asyncio.run(_cmd_briefing())
     if args.cmd == "job":

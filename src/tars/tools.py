@@ -81,6 +81,18 @@ async def save_note(db, args: dict[str, Any]) -> str:
     if cfg is not None and note_id is not None:
         entities_mod.schedule_extraction(db, cfg, int(note_id), body)
 
+    # Mirror the note into the vault directory (markdown for Obsidian).
+    # Failures here are also non-fatal — the note is already in SQLite.
+    if cfg is not None and note_id is not None:
+        try:
+            from tars.integrations.vault import write_note as _vault_write
+            _vault_write(
+                cfg, note_id=int(note_id), body=body,
+                tags=tags, source="agent", status="note",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("vault mirror failed for note %s: %s", note_id, e)
+
     return json.dumps({"ok": True, "note_id": note_id})
 
 

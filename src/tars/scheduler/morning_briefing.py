@@ -168,6 +168,13 @@ async def morning_briefing(agent, db, cfg) -> dict:
         (today, text, json.dumps(payload, default=str)),
     )
 
+    # Mirror to vault (Obsidian-readable). Non-fatal on failure.
+    try:
+        from tars.integrations.vault import write_briefing
+        write_briefing(cfg, today, text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("vault briefing mirror failed: %s", e)
+
     # Send to each allowed chat. Open a fresh Bot session so this is independent
     # of the long-polling bot lifecycle.
     bot = Bot(token=cfg.telegram.bot_token)

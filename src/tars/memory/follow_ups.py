@@ -49,6 +49,19 @@ def _parse_due(iso: str | None) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+async def _refresh_vault(db: Database) -> None:
+    """Regenerate vault/follow-ups.md from the current open set. Non-fatal."""
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return
+    try:
+        from tars.integrations.vault import write_followups
+        fus = await list_open(db, limit=200)
+        write_followups(cfg, fus)
+    except Exception as e:  # noqa: BLE001
+        log.warning("vault follow-up refresh failed: %s", e)
+
+
 async def open_followup(
     db: Database,
     note_id: int,
@@ -75,6 +88,7 @@ async def open_followup(
         "follow_up opened id=%d note_id=%d due_at=%s to=%s",
         fu_id, note_id, due_at_iso, promised_to,
     )
+    await _refresh_vault(db)
     return fu_id
 
 
@@ -119,6 +133,7 @@ async def close_followup(
     log.info(
         "follow_up closed id=%d resolving_note_id=%d", followup_id, resolving_note_id
     )
+    await _refresh_vault(db)
 
 
 # ---------------------------------------------------------------------------
