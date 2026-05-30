@@ -19,9 +19,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from tars.scheduler.brain_reindex import brain_reindex_job
 from tars.scheduler.calendar_pull import calendar_pull_job
+from tars.scheduler.cooldown_clear import cooldown_clear_job
+from tars.scheduler.cost_rollup_daily import cost_rollup_daily_job
 from tars.scheduler.email_summary import email_summary_job
 from tars.scheduler.morning_briefing import morning_briefing_job
 from tars.scheduler.runtime import set_runtime
+from tars.scheduler.vault_sweep import vault_sweep_job
 from tars.scheduler.weekly_followup_reconcile import weekly_followup_reconcile_job
 
 log = logging.getLogger("tars.scheduler")
@@ -85,7 +88,32 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
         CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=cfg.timezone),
         id="weekly_followup_reconcile",
         replace_existing=True,
-        misfire_grace_time=3600,  # 1h grace — it's the weekly nag, not time-critical
+        misfire_grace_time=3600,
+    )
+
+    # Every 5 min — clear expired provider cooldowns from the in-memory dict.
+    sched.add_job(
+        cooldown_clear_job,
+        IntervalTrigger(minutes=5),
+        id="cooldown_clear",
+        replace_existing=True,
+    )
+
+    # Daily at 00:05 (just after midnight) — roll up yesterday's cost ledger.
+    sched.add_job(
+        cost_rollup_daily_job,
+        CronTrigger(hour=0, minute=5, timezone=cfg.timezone),
+        id="cost_rollup_daily",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Every 10 min — sweep the vault for user-authored files and import them.
+    sched.add_job(
+        vault_sweep_job,
+        IntervalTrigger(minutes=10),
+        id="vault_sweep",
+        replace_existing=True,
     )
 
     log.info(

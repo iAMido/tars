@@ -149,6 +149,15 @@ async def _cmd_job(name: str) -> int:
         elif name == "weekly_followup_reconcile":
             from tars.scheduler.weekly_followup_reconcile import weekly_followup_reconcile
             summary = await weekly_followup_reconcile(db, cfg)
+        elif name == "cooldown_clear":
+            from tars.scheduler.cooldown_clear import cooldown_clear
+            summary = await cooldown_clear(db, cfg)
+        elif name == "cost_rollup_daily":
+            from tars.scheduler.cost_rollup_daily import cost_rollup_daily
+            summary = await cost_rollup_daily(db, cfg)
+        elif name == "vault_sweep":
+            from tars.scheduler.vault_sweep import vault_sweep
+            summary = await vault_sweep(db, cfg)
         else:
             log.error("unknown job: %s", name)
             return 2
@@ -268,6 +277,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "calendar_pull",
             "brain_reindex",
             "weekly_followup_reconcile",
+            "cooldown_clear",
+            "cost_rollup_daily",
+            "vault_sweep",
         ],
     )
 
