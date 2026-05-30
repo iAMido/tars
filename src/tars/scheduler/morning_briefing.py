@@ -34,7 +34,9 @@ FOLLOWUP_HORIZON_DAYS = 7
 async def _safe_gmail(now: int) -> tuple[list[dict], str | None]:
     since = now - OVERNIGHT_HOURS * 3600
     try:
-        return await fetch_unread_since(since, max_results=15), None
+        # include_body=True so the LLM has real content to summarize and
+        # extract action items from — not just snippets.
+        return await fetch_unread_since(since, max_results=12, include_body=True), None
     except Exception as e:  # noqa: BLE001
         log.warning("morning_briefing: gmail fetch degraded (%s)", e)
         return [], f"gmail unavailable: {type(e).__name__}"
@@ -105,13 +107,34 @@ PROMPT_TEMPLATE = (
     "Compose today's morning briefing in TARS voice.\n"
     "\n"
     "STRICT format rules:\n"
-    "- Render ONLY the sections whose JSON key is present in the payload. "
-    "If a section's data is absent from the JSON below, do not write its header at all.\n"
-    "- Possible section headers (only when their data exists): *Email*, *Calendar*, *Open follow-ups*, *Warnings*.\n"
-    "- 1-3 lines per section. No greeting, no sign-off, no commentary.\n"
-    "- For follow-ups: cite as [followup:N]. Include due_human verbatim if present (e.g. 'today 15:00').\n"
-    "- For emails: one line per email, 'From — Subject'.\n"
-    "- For calendar events: one line per event, 'HH:MM — Title' if same-day, else 'YYYY-MM-DD HH:MM — Title'.\n"
+    "- Render ONLY sections whose JSON key is present in the payload. If a "
+    "section's data is absent below, do not write its header at all.\n"
+    "- Possible section headers (only when data exists): *Email*, *Calendar*, "
+    "*Open follow-ups*, *Action items*, *Warnings*.\n"
+    "- No greeting, no sign-off, no commentary outside section bodies.\n"
+    "\n"
+    "*Email* — for each email, output a single line:\n"
+    "  `<From shortened to name or org> — <one-line summary of what the email actually says, not just the subject>`\n"
+    "  Read the body. Mention concrete facts (numbers, deadlines, names) the user "
+    "should know. Skip footer/unsubscribe/legalese. Skip purely promotional fluff "
+    "but DO mention if a newsletter has 1-2 things worth noticing.\n"
+    "\n"
+    "*Calendar* — one line per event: `HH:MM — Title` if today, else `YYYY-MM-DD HH:MM — Title`.\n"
+    "\n"
+    "*Open follow-ups* — one line per item: `<body> (due_human) [followup:N]`.\n"
+    "\n"
+    "*Action items* — extract from emails/calendar/follow-ups. Suggest what the "
+    "user could do, prefixed by a verb. Examples:\n"
+    "  - `Reply to Sarah re: budget — she's asking for confirmation by Thu`\n"
+    "  - `Schedule meeting with Joe per his email (Tue/Wed afternoon)`\n"
+    "  - `note: rent receipt $X received from landlord` (use this prefix exactly so "
+    "the user can copy-paste back into the chat to save it)\n"
+    "  - `remind me to renew domain X.com before 2026-06-15` (same — copy-paste-able)\n"
+    "Only include items that require action. Skip newsletters, notifications, "
+    "automated receipts unless they need a response. If nothing requires action, "
+    "omit the entire *Action items* section.\n"
+    "\n"
+    "*Warnings* — one line per warning, terse.\n"
     "\n"
     "Payload:\n{payload}\n"
     "\n"

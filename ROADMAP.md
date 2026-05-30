@@ -10,24 +10,20 @@ If after a week you have 2-3 concrete observations like "I keep wanting X" or "Y
 
 ---
 
-## Tier 1 — Promised today, queued
+## Tier 1 — DONE
+
+| Item | Status |
+|---|---|
+| **Obsidian one-way mirror** | ✅ Shipped V1.1 — vault writer + Syncthing + paired with Windows Obsidian vault. Files at `C:\Users\ido\Obsidian\Ido\tars\`. |
+
+## Tier 2 — V1.1 mostly DONE; 2 items deferred to V2
 
 | Item | Effort | Status |
 |---|---|---|
-| **Obsidian one-way mirror** | ~1 hour | Promised after V1 ships. TARS writes notes to `~/vault/YYYY-MM-DD.md`. Syncthing daemon on VPS + laptop. Obsidian on desktop points at the synced folder. No two-way (TARS doesn't read back edits). |
-
-That's it for Tier 1. Everything below is optional.
-
----
-
-## Tier 2 — V1.1 candidates (deferred from original plan, real value)
-
-| Item | Effort | Value | Cost impact |
-|---|---|---|---|
-| **ElevenLabs voice** (Voice Design, not cloning Bill Irwin) | ~3 hours | Marquee feature in the artifact. TARS reads morning briefing aloud via Telegram voice notes. Cool factor: very high. Practical value: depends if you listen. | +$22/mo Creator plan |
-| **Storage Box as 2nd backup destination** | ~30 min | True account-isolation for backups. B2 alone is enough, but two destinations is safer. | +€3.49/mo |
-| **`stale_thread_summarize` (Mondays)** | ~30 min | Roll old conversations into single notes. Memory hygiene as conversations accumulate. | Negligible |
-| **`news_sources_refresh` (hourly)** + tracked domains via RSS | ~1 hour | Pull from RSS feeds, populate brain_docs. Lets you ask "what's new with X this week?" | Negligible |
+| **`stale_thread_summarize`** (Sun 17:00) | ~30 min | ✅ Shipped V1.1 |
+| **`news_sources_refresh`** (hourly) + RSS infrastructure | ~1 hour | ✅ Shipped V1.1 with `/feeds` Telegram management |
+| **ElevenLabs voice** (Voice Design, not cloning Bill Irwin) | ~3 hours | ⏳ **Deferred to V2** — marquee feature, TARS reads morning briefing aloud via Telegram voice notes. Cool factor: very high. Practical value: depends if you listen. Cost: +$22/mo Creator plan. |
+| **Storage Box as 2nd backup destination** | ~30 min | ⏳ **Deferred to V2** — true account-isolation for backups. B2 alone is enough; two destinations is safer. Cost: +€3.49/mo. |
 
 ---
 
@@ -49,22 +45,30 @@ I'd build these only when the corresponding pain shows up in real use.
 
 ---
 
-## Tier 4 — Remaining scheduled jobs from the original artifact
+## Tier 4 — Scheduled jobs from the original artifact
 
-The artifact lists 18 jobs. We shipped 5. Of the other 13, only a few would actually pay off:
+The artifact lists 18 jobs. We shipped **13**:
 
-| Job | Worth building? |
+| Job | Status |
 |---|---|
-| `news_sources_refresh` | **Yes** if you track specific companies/domains (already in Tier 2) |
-| `competitive_intel_scan` (9/13/17) | Yes if you have competitors to watch |
-| `entity_dedup` (nightly) | Maybe — only after the entity store has >100 entries |
-| `vault_sweep` (every 10m) | Required IF you go to Obsidian two-way (Tier 5 work) |
-| `voice_quota_check` (hourly) | Required IF you add ElevenLabs |
-| `cost_rollup_daily` (midnight) | Cosmetic; the dashboard already shows daily aggregates |
-| `lab_notebook_digest` (Fridays) | Nice for personal review |
-| `health_self_ping` (every 1m) | Already covered by systemd `Restart=on-failure` |
-| `cooldown_clear` (every 5m) | Unnecessary; restart fixes any stuck state |
-| `stale_thread_summarize` (Mondays) | **Yes** (already in Tier 2) |
+| `morning_briefing` (05:00) | ✅ |
+| `email_summary` (30m, quiet 22-07) | ✅ |
+| `calendar_pull` (15m) | ✅ |
+| `brain_reindex` (15m, diff mode) | ✅ |
+| `weekly_followup_reconcile` (Sun 18:00) | ✅ |
+| `cooldown_clear` (5m) | ✅ |
+| `cost_rollup_daily` (00:05) | ✅ |
+| `vault_sweep` (10m) | ✅ |
+| `news_sources_refresh` (hourly) | ✅ |
+| `competitive_intel_scan` (9/13/17) | ✅ |
+| `entity_dedup` (02:00) | ✅ |
+| `stale_thread_summarize` (Sun 17:00) | ✅ |
+| `lab_notebook_digest` (Thu 16:00) | ✅ |
+| `voice_quota_check` (hourly) | ⏳ V2 with ElevenLabs |
+| `health_self_ping` (every 1m) | ❌ skipped — systemd `Restart=on-failure` covers this |
+| `restic_b2_push` (07:00) | ✅ shipped as systemd timer (`tars-backup.timer`) at 06:00 |
+| `restic_offsite_push` (08:00) | ⏳ V2 with Storage Box |
+| `vault_sweep` two-way ingest | ⏳ V2 if Obsidian editing surfaces conflicts |
 
 ---
 

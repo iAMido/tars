@@ -26,16 +26,18 @@
 - **Phase 8 complete** — FastAPI read-only dashboard at `https://tars-prod.<tailnet>.ts.net`. Bound 127.0.0.1, exposed via `tailscale serve --bg --https=443`. Vanilla-JS single page with: headline KPIs (30d/7d spend, cache hit %, notes count), 14-day cost bar chart, live SSE scheduled-jobs table, open follow-ups, recent notes, conversations, entities, latest briefing. Auto-refresh 10s; SSE updates every 2s.
 - **API keys rotated** — Telegram bot token, OpenRouter, OpenAI, Voyage. Old leaked keys revoked. OpenAI hard spend limit set.
 - **V1.0.0 shipped** — `/stats` Telegram command, README with deploy/restore runbooks, dashboard timezone fix. 47 unit tests green. Tag `v1.0.0`.
-- **V1.1 shipped (one big session)** — Obsidian one-way mirror (vault writer + Syncthing user systemd unit + bilateral pair to Windows Obsidian vault); 8 additional scheduled jobs registered:
+- **V1.1 shipped (one big session)** — Obsidian one-way mirror (vault writer + Syncthing user systemd unit + bilateral pair to Windows Obsidian vault at `C:\Users\ido\Obsidian\Ido\tars\`); 8 additional scheduled jobs registered:
   - `cooldown_clear` every 5m — clears expired router provider cooldowns
   - `cost_rollup_daily` 00:05 — aggregates yesterday's ledger into cost_rollups
   - `vault_sweep` every 10m — ingests user-authored markdown from vault back to notes/index
-  - `news_sources_refresh` hourly — fetches `kind='news'` feeds into feed_items
+  - `news_sources_refresh` hourly — fetches `kind='news'` feeds into feed_items (silent, populates brain for search_memory)
   - `competitive_intel_scan` 09/13/17 — fetches `kind='competitive'` feeds and pings Telegram on new items
   - `entity_dedup` 02:00 — heuristic merge of case-duplicate + alias-collision entities (no LLM, deterministic)
   - `stale_thread_summarize` Sun 17:00 — summarizes conversations idle >30d into thread_summary notes
   - `lab_notebook_digest` Thu 16:00 — weekly review of last 7 days of notes, posts to Telegram + saves as note
-  Total: **13 scheduled jobs** running. RSS infra added (`feeds` + `feed_items` tables, feedparser wrapper, `tars feeds {list|add}` CLI). Vault writer hooks into save_note + briefings + follow-up lifecycle for live Obsidian mirroring.
+  Total: **13 scheduled jobs** running.
+- **Feeds management as a real tool** — `/feeds` Telegram command (list / add / remove / enable / disable from your phone), `tars feeds` CLI with full lifecycle, README docs with reliable-feed-URL patterns and the full data flow diagram. RSS infra: `feeds` + `feed_items` tables + feedparser wrapper, async-wrapped so the bot's event loop never blocks. Feed items get embedded into brain_docs by `brain_reindex` and become searchable via `search_memory`.
+- **Vault writer** hooks into save_note + briefings + follow-up lifecycle so the Obsidian-side files stay live without explicit re-sync.
 - Stuck on int8 vec_docs schema mismatch: voyageai 0.3.7 returns float32 regardless of `output_dtype="int8"`. Switched to `float[1024]`, lost the 4× space savings but unblocked indexing. Documented in commit 892a237.
 - Known polish item: TARS voice still too chatty (adds "Confirm if that's changed…" tails). Sharpen system prompt later.
 
