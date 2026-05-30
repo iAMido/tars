@@ -224,6 +224,17 @@ async def _sync_followups_from_vault(db, cfg, vault_root: Path) -> dict:
     if not missing:
         return {"followups_closed_via_vault": 0}
 
+    # Safety: if the file parses to ZERO follow-up tokens AND we still have open
+    # follow-ups in the DB, this is almost certainly a parsing failure or a
+    # stale file — refuse to mass-close.
+    if not ids_in_file and open_ids:
+        log.warning(
+            "vault_sweep: follow-ups.md has 0 [followup:N] tokens but %d open "
+            "follow-ups in DB. Refusing to close. File may be stale or unparseable.",
+            len(open_ids),
+        )
+        return {"followups_closed_via_vault": 0, "skipped_due_to_empty_parse": len(open_ids)}
+
     from tars.memory.follow_ups import FollowUpError, close_followup
     closed = 0
     now = int(time.time())

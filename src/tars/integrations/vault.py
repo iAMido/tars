@@ -182,9 +182,14 @@ def write_followups(cfg, open_followups: list[dict]) -> Path:
         reopens = fu.get("reopened_count") or 0
         reopen_str = f" · reopens={reopens}" if reopens else ""
         promised = f" · to {fu['promised_to']}" if fu.get("promised_to") else ""
+        # The [followup:N] token at the end is parsed by vault_sweep to know
+        # which follow-ups are still in the file. If a user deletes a line, the
+        # follow-up id is missing from the file -> sweep closes it.
+        # Keep this token even if the formatting around it changes — sweep
+        # depends on it.
         lines.append(
             f"- [[notes/note-{fu['note_id']:05d}|#{fu['note_id']}]] "
-            f"{body} (due {due_str}{promised}{reopen_str})"
+            f"{body} (due {due_str}{promised}{reopen_str}) [followup:{fu['followup_id']}]"
         )
     _atomic_write(path, front + "\n" + "\n".join(lines) + "\n")
     log.debug("vault: wrote %s", path)

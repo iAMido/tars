@@ -104,6 +104,20 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_note",
+            "description": "Fetch a single note by its exact integer id. Use this when the user references a note by id (e.g. 'note 5', 'show me note:12', '[note:7]') instead of semantic search. Returns body, created date, source, status, tags, and any closure linkage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "open_followup",
             "description": "Track a promise/reminder. Call save_note first to capture the promise, then open_followup with that note_id. Use get_current_time first if the user said 'tomorrow' / 'next week' etc.",
             "parameters": {
