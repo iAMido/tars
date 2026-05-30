@@ -164,6 +164,15 @@ async def _cmd_job(name: str) -> int:
         elif name == "competitive_intel_scan":
             from tars.scheduler.competitive_intel_scan import competitive_intel_scan
             summary = await competitive_intel_scan(agent, db, cfg)
+        elif name == "entity_dedup":
+            from tars.scheduler.entity_dedup import entity_dedup
+            summary = await entity_dedup(db, cfg)
+        elif name == "stale_thread_summarize":
+            from tars.scheduler.stale_thread_summarize import stale_thread_summarize
+            summary = await stale_thread_summarize(agent, db, cfg)
+        elif name == "lab_notebook_digest":
+            from tars.scheduler.lab_notebook_digest import lab_notebook_digest
+            summary = await lab_notebook_digest(agent, db, cfg)
         else:
             log.error("unknown job: %s", name)
             return 2
@@ -288,6 +297,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "vault_sweep",
             "news_sources_refresh",
             "competitive_intel_scan",
+            "entity_dedup",
+            "stale_thread_summarize",
+            "lab_notebook_digest",
         ],
     )
 

@@ -23,9 +23,12 @@ from tars.scheduler.competitive_intel_scan import competitive_intel_scan_job
 from tars.scheduler.cooldown_clear import cooldown_clear_job
 from tars.scheduler.cost_rollup_daily import cost_rollup_daily_job
 from tars.scheduler.email_summary import email_summary_job
+from tars.scheduler.entity_dedup import entity_dedup_job
+from tars.scheduler.lab_notebook_digest import lab_notebook_digest_job
 from tars.scheduler.morning_briefing import morning_briefing_job
 from tars.scheduler.news_sources_refresh import news_sources_refresh_job
 from tars.scheduler.runtime import set_runtime
+from tars.scheduler.stale_thread_summarize import stale_thread_summarize_job
 from tars.scheduler.vault_sweep import vault_sweep_job
 from tars.scheduler.weekly_followup_reconcile import weekly_followup_reconcile_job
 
@@ -134,6 +137,33 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
         CronTrigger(hour="9,13,17", minute=0, timezone=cfg.timezone),
         id="competitive_intel_scan",
         replace_existing=True,
+    )
+
+    # Nightly 02:00 — deterministic dedup of case-duplicate and alias-collision entities.
+    sched.add_job(
+        entity_dedup_job,
+        CronTrigger(hour=2, minute=0, timezone=cfg.timezone),
+        id="entity_dedup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Sunday 17:00 — summarize conversations idle >30d into thread_summary notes.
+    sched.add_job(
+        stale_thread_summarize_job,
+        CronTrigger(day_of_week="sun", hour=17, minute=0, timezone=cfg.timezone),
+        id="stale_thread_summarize",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Thursday 16:00 — weekly review of notes from the past 7 days.
+    sched.add_job(
+        lab_notebook_digest_job,
+        CronTrigger(day_of_week="thu", hour=16, minute=0, timezone=cfg.timezone),
+        id="lab_notebook_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     log.info(
