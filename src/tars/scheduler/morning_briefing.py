@@ -41,8 +41,9 @@ def _extract_suggestions(briefing_text: str) -> list[str]:
     lines = briefing_text.splitlines()
     in_section = False
     items: list[str] = []
-    header_re = re.compile(r"^\s*(?:\*+|#+)\s*\w[\w\s-]*\*+?\s*$")
-    suggestions_re = re.compile(r"^\s*(?:\*+|#+)\s*Suggestions?\s*\*+?\s*$", re.IGNORECASE)
+    # Matches any markdown section header (*X*, **X**, ***X***, # X, etc.)
+    header_re = re.compile(r"^\s*(?:\*{1,3}|#+)\s*\w[\w\s-]*\*{0,3}\s*$")
+    suggestions_re = re.compile(r"^\s*(?:\*{1,3}|#+)\s*Suggestions?\s*\*{0,3}\s*$", re.IGNORECASE)
     for raw in lines:
         if not in_section:
             if suggestions_re.match(raw):
@@ -142,6 +143,8 @@ PROMPT_TEMPLATE = (
     "section's data is absent below, do not write its header at all.\n"
     "- Possible section headers (only when data exists): *Email*, *Calendar*, "
     "*Open follow-ups*, *Suggestions*, *Warnings*.\n"
+    "- Section headers use SINGLE asterisks like `*Email*` (Telegram Markdown). "
+    "Never `**double**` — Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
     "\n"
     "*Email* — for each email, output a single line:\n"
@@ -157,13 +160,12 @@ PROMPT_TEMPLATE = (
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
     "These are NOT things you (TARS) are doing — just things the user could ask "
     "you to do. Format as a numbered list, plain language. No verb prefixes like "
-    "'Reply:' or 'note:' or 'remind me to'.\n"
-    "End each suggestion line with the hashtag `#briefing/{today}` so the user "
-    "can copy any line into a note and the hashtag survives into Obsidian for "
-    "later filtering. Example:\n"
-    "  1. Open a Portuguese Revolut local account — Revolut email mentioned smoother cross-border payments #briefing/{today}\n"
-    "  2. Reply to Sarah re Q3 budget — she's asking by Thursday #briefing/{today}\n"
-    "  3. Read Globerman's piece this weekend #briefing/{today}\n"
+    "'Reply:' or 'note:' or 'remind me to'. NO hashtags in suggestions — they "
+    "render poorly in Telegram and tags are auto-applied to saved notes anyway.\n"
+    "Example:\n"
+    "  1. Open a Portuguese Revolut local account — Revolut email mentioned smoother cross-border payments\n"
+    "  2. Reply to Sarah re Q3 budget — she's asking by Thursday\n"
+    "  3. Read Globerman's piece this weekend\n"
     "\n"
     "FILTER STRICTLY. Include only items that:\n"
     "  - Require an actual decision, reply, or time-sensitive action from the user\n"
@@ -176,8 +178,7 @@ PROMPT_TEMPLATE = (
     "  - Anything the user obviously already knows or has handled\n"
     "If after filtering there are zero items worth suggesting, OMIT the entire "
     "*Suggestions* section. Better silent than noisy.\n"
-    "After the list (only if any items): one final line exactly:\n"
-    "  `Reply with what you want me to do — e.g. 'note: <copy line here>' to save (hashtag included), 'remind me to X' to schedule.`\n"
+    "No footer line below the list — the user has tap-to-act buttons attached.\n"
     "\n"
     "*Warnings* — one line per warning, terse.\n"
     "\n"
@@ -231,6 +232,9 @@ async def morning_briefing(agent, db, cfg) -> dict:
         tier="cron_default",
     )
     text = out["text"].strip() or "(briefing empty)"
+    # DeepSeek sometimes emits **double** asterisks despite the prompt rule;
+    # collapse to single so Telegram's Markdown parser renders them as bold.
+    text = re.sub(r"\*\*(\S[^*\n]*?\S)\*\*", r"*\1*", text)
 
     # Persist to briefings.
     await db.execute(
@@ -265,9 +269,9 @@ async def morning_briefing(agent, db, cfg) -> dict:
                         briefing_date=today,
                     )
                     kb = build_suggestion_keyboard(pending_ids)
-                    await bot.send_message(chat_id, text, reply_markup=kb)
+                    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
                 else:
-                    await bot.send_message(chat_id, text)
+                    await bot.send_message(chat_id, text, parse_mode="Markdown")
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("morning_briefing: send_message to %s failed (%s)", chat_id, e)
