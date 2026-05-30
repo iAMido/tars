@@ -38,11 +38,56 @@ log = logging.getLogger("tars.scheduler.vault_sweep")
 # Files matching this pattern were written by TARS — they are TARS-owned notes
 # (note-NNNNN.md). Synced bidirectionally per step 1 below, NOT re-ingested.
 TARS_NOTE_PATTERN = re.compile(r"^note-(\d{5})\.md$")
-# Directories vault_sweep doesn't ingest from (Syncthing internals, our own
-# briefings/notes which are handled separately, Obsidian config).
-SKIP_DIRS = {"notes", "briefings", ".stversions", ".stfolder", ".syncthing", ".obsidian"}
+# Directories vault_sweep doesn't ingest from (Syncthing internals, TARS's own
+# managed folder, Obsidian config, templates).
+SKIP_DIRS = {
+    "_TARS",        # all TARS-managed files live here, handled separately
+    "_Templates",   # Obsidian templates — not real notes
+    ".stversions", ".stfolder", ".syncthing",  # Syncthing internals
+    ".obsidian", ".trash",  # Obsidian internals
+    # Legacy top-level dirs (before _TARS migration) — keep skipping in case
+    # any orphan files linger after the move.
+    "notes", "briefings",
+}
 # Loose follow-up id pattern within follow-ups.md
 FOLLOWUP_REF_RE = re.compile(r"\[followup:(\d+)\]")
+
+# PARA folder → tag mapping. Used by _ingest_user_authored_markdown so notes
+# pulled from PARA folders carry their workflow tag automatically.
+# Keys are folder names with their leading numeric prefix; matched case-insensitive.
+PARA_FOLDER_TAGS: dict[str, list[str]] = {
+    "00_inbox":     ["area/inbox"],
+    "01_projects":  ["area/project"],
+    "02_areas":     ["area/ongoing"],
+    "03_resources": ["area/resource"],
+    "04_archive":   ["area/archive"],
+}
+
+
+def _para_tags_for(rel_path: str) -> list[str]:
+    """Given a vault-relative path like '01_Projects/TARS/notes.md', return
+    a list of tags: ['area/project', 'project/TARS']. For files in non-PARA
+    folders, returns ['vault']."""
+    parts = rel_path.replace("\\", "/").split("/")
+    if not parts:
+        return ["vault"]
+    top = parts[0].lower()
+    base_tags = PARA_FOLDER_TAGS.get(top)
+    if base_tags is None:
+        return ["vault"]
+    tags = list(base_tags)
+    # Add a per-subfolder tag for Projects, Areas, Resources, Archive
+    # (Inbox is flat — no sub-grouping convention).
+    if len(parts) >= 3 and top != "00_inbox":
+        sub = parts[1].strip()
+        if sub and not sub.startswith("."):
+            # e.g. area/project + project/TARS
+            kind = top.split("_", 1)[1] if "_" in top else top
+            # Singularize the kind for the sub-tag prefix.
+            kind_singular = {"projects": "project", "areas": "area",
+                             "resources": "resource"}.get(kind, kind)
+            tags.append(f"{kind_singular}/{sub}")
+    return tags
 
 
 async def vault_sweep_job() -> dict:
@@ -109,12 +154,12 @@ async def vault_sweep(db, cfg) -> dict:
 
 
 async def _sync_tars_notes_from_vault(db, cfg, vault_root: Path) -> dict:
-    """For every vault/notes/note-NNNNN.md, detect edits or deletions.
+    """For every vault/_TARS/notes/note-NNNNN.md, detect edits or deletions.
 
     - Body edited externally -> update notes.body, re-embed.
     - File deleted -> mark note status='deleted', drop from brain/vec.
     """
-    notes_dir = vault_root / "notes"
+    notes_dir = vault_root / "_TARS" / "notes"
     edited = 0
     deleted = 0
     if not notes_dir.exists():
@@ -200,7 +245,7 @@ async def _sync_followups_from_vault(db, cfg, vault_root: Path) -> dict:
     """If user removed a [followup:N] line from follow-ups.md, close that
     follow-up in the DB. Synthetic resolving note is created so the
     citation-gated close stays valid."""
-    fu_file = vault_root / "follow-ups.md"
+    fu_file = vault_root / "_TARS" / "follow-ups.md"
     if not fu_file.exists():
         return {"followups_closed_via_vault": 0}
     try:
@@ -298,10 +343,15 @@ async def _ingest_user_authored_markdown(db, cfg, vault_root: Path) -> dict:
         if seen.get(rel) == h:
             continue
 
+        # PARA-aware tagging: detect which top-level folder the note came from
+        # and add area/X (+ optional project/X) tags.
+        tags_list = _para_tags_for(rel)
+        tags_json = json.dumps(tags_list)
+
         cur = await db.execute(
             "INSERT INTO notes(created_at, source, body, tags, ext_path) "
-            "VALUES (?, 'vault', ?, '[\"vault\"]', ?)",
-            (int(time.time()), body[:5000], rel),
+            "VALUES (?, 'vault', ?, ?, ?)",
+            (int(time.time()), body[:5000], tags_json, rel),
         )
         note_id = cur.lastrowid
         try:
@@ -311,11 +361,14 @@ async def _ingest_user_authored_markdown(db, cfg, vault_root: Path) -> dict:
             await index_single_doc(
                 db, embedder,
                 source="vault", source_ref=rel,
-                title=md_path.stem[:60], body=body, tags='["vault"]',
+                title=md_path.stem[:60], body=body, tags=tags_json,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("vault_sweep: index failed for %s (%s)", rel, e)
         imported += 1
-        log.info("vault_sweep: imported user-authored %s as note #%s", rel, note_id)
+        log.info(
+            "vault_sweep: imported user-authored %s as note #%s tags=%s",
+            rel, note_id, tags_list,
+        )
 
     return {"user_scanned": scanned, "user_imported": imported}
