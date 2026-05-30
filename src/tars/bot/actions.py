@@ -23,7 +23,7 @@ from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
 from tars.memory.follow_ups import open_followup
 from tars.tools import save_note as tool_save_note
@@ -140,18 +140,22 @@ async def handle_callback(callback, bot: Bot, agent, cfg) -> None:
             result_payload = {"note_id": note_id, "followup_id": fu_id}
 
         elif action == "rc":
-            # Custom-time reminder: send a force-reply prompt asking when.
-            # Don't consume yet — wait for the user's text reply.
+            # Custom-time reminder: send a ForceReply prompt — Telegram opens
+            # the user's keyboard pre-set to reply to THIS message, so we can
+            # cleanly detect the reply via message.reply_to_message.message_id.
             prompt = (
                 f"⏰ When should I remind you about:\n_{text[:200]}_\n\n"
                 f"Reply with a time — e.g. `in 2 hours`, `tomorrow 3pm`, "
-                f"`next Monday 9am`, `2026-06-15 14:00`."
+                f"`friday 5pm`, `2026-06-15 14:00`."
             )
             sent = await bot.send_message(
                 chat_id=callback.message.chat.id,
                 text=prompt,
                 parse_mode="Markdown",
-                reply_to_message_id=callback.message.message_id,
+                reply_markup=ForceReply(
+                    input_field_placeholder="e.g. tomorrow 3pm",
+                    selective=True,
+                ),
             )
             await agent.db.execute(
                 "UPDATE pending_actions SET awaiting_kind = ?, "
