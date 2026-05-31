@@ -72,6 +72,7 @@ RECENT_NOTES_HOURS = 36         # everything jotted in the last day-and-a-half
 RECENT_NOTES_MAX = 20
 RELEVANT_NOTES_MAX = 10         # semantic retrieval cap (after recent_notes dedup)
 RELEVANT_NOTES_PER_QUERY_K = 3  # top-k per individual context query
+RELEVANT_NOTES_QUERY_CAP = 6    # max distinct queries we run (Voyage RPM)
 NOTE_BODY_MAX = 400             # per-note body truncation for prompt
 
 
@@ -146,16 +147,30 @@ async def _relevant_notes_for_today(
         return []
 
     seen: dict[int, dict] = {}
+    consecutive_failures = 0
+    issued = 0
     for q in queries:
+        if issued >= RELEVANT_NOTES_QUERY_CAP:
+            break
         q = (q or "").strip()
         if not q or len(q) < 4:
             continue
+        issued += 1
         try:
             hits = await hybrid_search(
                 db, embedder, query=q, k=RELEVANT_NOTES_PER_QUERY_K,
             )
+            consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             log.warning("relevant_notes search %r failed (%s)", q[:40], e)
+            consecutive_failures += 1
+            # Rate-limit or auth failure → all subsequent calls will fail
+            # the same way. Bail rather than spam the log.
+            if consecutive_failures >= 2:
+                log.warning(
+                    "relevant_notes: 2 consecutive failures — skipping rest"
+                )
+                break
             continue
         for h in hits:
             if h.get("source") != "note":

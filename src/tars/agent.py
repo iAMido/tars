@@ -139,7 +139,16 @@ class Agent:
         # Track every note id that a tool surfaced this turn — used by the
         # citation guardrail at the end. Includes save_note returns,
         # get_note returns, and any doc_id mentioned in search_memory hits.
+        # Also pre-seed with any ids that appear in the INPUT user_text:
+        # callers like morning_briefing pass a JSON payload containing
+        # `"id": N` for each note already retrieved, and the LLM is free to
+        # cite those without needing a tool call to "re-verify" them.
         verified_note_ids: set[int] = set()
+        for m in _NOTE_ID_IN_TOOL_RESULT_RE.finditer(user_text):
+            try:
+                verified_note_ids.add(int(m.group(1)))
+            except ValueError:
+                pass
 
         total_cost = 0.0
         for step in range(tool_loop_max):
