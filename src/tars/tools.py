@@ -130,6 +130,65 @@ async def get_note(db, args: dict[str, Any]) -> str:
     )
 
 
+async def list_notes(db, args: dict[str, Any]) -> str:
+    """List the user's notes by recency. Use for 'show me my notes',
+    'what did I note today/this week', 'last N notes', etc. — anything that
+    asks for a LIST rather than a semantic SEARCH.
+
+    Args:
+      limit:      max notes to return (default 20, max 100)
+      since_days: only notes from the last N days (omit = no time filter)
+      tag:        only notes whose tags JSON contains this string (optional)
+      include_closed: include status='closed' rows (default false)
+    """
+    try:
+        limit = min(int(args.get("limit") or 20), 100)
+    except (TypeError, ValueError):
+        limit = 20
+    since_days = args.get("since_days")
+    tag = (args.get("tag") or "").strip()
+    include_closed = bool(args.get("include_closed"))
+
+    where = ["status != 'deleted'"]
+    params: list[Any] = []
+    if not include_closed:
+        where.append("status != 'closed'")
+    if since_days:
+        try:
+            cutoff = int(time.time()) - int(since_days) * 86400
+            where.append("created_at >= ?")
+            params.append(cutoff)
+        except (TypeError, ValueError):
+            pass
+    if tag:
+        where.append("tags LIKE ?")
+        params.append(f"%{tag}%")
+    params.append(limit)
+    sql = (
+        "SELECT id, datetime(created_at,'unixepoch','localtime') AS created, "
+        "       source, status, body, tags "
+        "FROM notes WHERE " + " AND ".join(where) + " "
+        "ORDER BY created_at DESC LIMIT ?"
+    )
+    rows = await db.fetch_all(sql, tuple(params))
+    out = []
+    for r in rows:
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except json.JSONDecodeError:
+            tags = []
+        out.append({
+            "id": int(r["id"]),
+            "note_id": int(r["id"]),  # alias so the guardrail regex picks it up too
+            "created": r["created"],
+            "source": r["source"],
+            "status": r["status"],
+            "preview": (r["body"] or "").split("\n")[0][:200],
+            "tags": tags,
+        })
+    return json.dumps({"notes": out, "count": len(out)}, ensure_ascii=False)
+
+
 async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
     query = (args.get("query") or "").strip()
     if not query:
@@ -228,6 +287,7 @@ async def web_research(db, args: dict[str, Any]) -> str:
 TOOL_REGISTRY = {
     "save_note": save_note,
     "get_note": get_note,
+    "list_notes": list_notes,
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,

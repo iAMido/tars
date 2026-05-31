@@ -52,8 +52,15 @@ SYSTEM_BLOCK = (
     "TARS: Noted. [note:N]\n"
     "\n"
     "TOOL USE:\n"
-    "- search_memory: call for ANY user-specific question before answering. "
-    "If results are empty, the answer is \"Unknown.\" — do not propose how the user could tell you.\n"
+    "- search_memory: SEMANTIC search for ANY user-specific question before "
+    "answering. If results are empty, the answer is \"Unknown.\" — do not "
+    "propose how the user could tell you.\n"
+    "- list_notes: call when the user asks to LIST or SEE their notes "
+    "(\"show me my notes\", \"what did I note today\", \"last N notes\"). "
+    "This is the correct tool for listing — not search_memory.\n"
+    "- get_note: call when the user references a specific note by id "
+    "(\"note 5\", \"[note:12]\"). Use this to verify before citing.\n"
+    "- Never cite [note:N] unless N appeared in this turn's tool results.\n"
     "- save_note: only when the user explicitly states a fact to remember or uses the \"note:\" prefix.\n"
     "- Reminders: when the user says \"remind me to X\" or \"I promised Y\", "
     "(1) save_note with the action, (2) get_current_time if a relative time was given, "
@@ -98,6 +105,22 @@ TOOLS: list[dict] = [
                     "k": {"type": "integer", "default": 8},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_notes",
+            "description": "List notes by recency. Use for any 'show me my notes', 'what did I note today/this week', 'last N notes' request. NOT for semantic search — use search_memory for that. Returns id + preview + created date + tags per note.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20, "description": "Max notes to return (cap 100)."},
+                    "since_days": {"type": "integer", "description": "Only notes from the last N days. Omit for no filter."},
+                    "tag": {"type": "string", "description": "Substring match against the tags JSON column (e.g. 'briefing', 'area/inbox')."},
+                    "include_closed": {"type": "boolean", "default": False, "description": "Include status='closed' rows (default false — they're usually noise)."},
+                },
             },
         },
     },

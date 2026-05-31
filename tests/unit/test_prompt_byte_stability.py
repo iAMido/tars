@@ -20,7 +20,7 @@ from tars import prompt
 
 
 # Pin the canonical anchor hash. Update DELIBERATELY when changing the prompt.
-EXPECTED_HASH = "18f697f533bd1fd094f5c464cdb80248b88c9b54a6d2377e1eb4f474fb059ca1"
+EXPECTED_HASH = "1000127fc4ade67b336c884ee1d830bb500e1c8d484b57358ce50737685c1276"
 
 
 def test_anchor_hash_stable() -> None:
@@ -74,6 +74,7 @@ def test_required_tools_present() -> None:
     assert names >= {
         "save_note",
         "get_note",
+        "list_notes",
         "search_memory",
         "open_followup",
         "close_followup",
