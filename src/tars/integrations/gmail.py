@@ -277,6 +277,32 @@ def _gather_briefing_intel_sync(
     return out
 
 
+# Cached at first use; the user's email address never changes within a process.
+_self_email_cache: str | None = None
+
+
+def _get_self_email_sync() -> str:
+    creds = load_credentials()
+    svc = _build_service(creds)
+    prof = svc.users().getProfile(userId="me").execute()
+    return (prof.get("emailAddress") or "").lower()
+
+
+async def get_self_email() -> str:
+    """Return the authenticated Gmail account's address (lowercased).
+    Cached after first call; safe to call repeatedly."""
+    global _self_email_cache
+    if _self_email_cache is not None:
+        return _self_email_cache
+    try:
+        addr = await asyncio.to_thread(_get_self_email_sync)
+    except Exception as e:  # noqa: BLE001
+        log.warning("get_self_email failed (%s) — returning empty string", e)
+        addr = ""
+    _self_email_cache = addr
+    return addr
+
+
 async def gather_briefing_intel(
     overnight_since_ts: int,
     attendee_addresses: list[str],

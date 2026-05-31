@@ -22,7 +22,11 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from tars.integrations.gcal import fetch_upcoming
-from tars.integrations.gmail import extract_email_addr, gather_briefing_intel
+from tars.integrations.gmail import (
+    extract_email_addr,
+    gather_briefing_intel,
+    get_self_email,
+)
 from tars.memory.follow_ups import list_open
 
 log = logging.getLogger("tars.scheduler.morning_briefing")
@@ -171,6 +175,11 @@ PROMPT_TEMPLATE = (
     "STRICT format rules:\n"
     "- Render ONLY sections whose data is present below. If absent, OMIT the "
     "header entirely. Better silent than padded.\n"
+    "- NEVER write 'None.', 'Nothing.', 'N/A', '(empty)', or any placeholder "
+    "in place of a section body. If after your own filtering a section has "
+    "nothing worth including, OMIT the header AND body completely.\n"
+    "- When you cite a follow-up id, wrap the bracketed token in backticks: "
+    "`` `[followup:N]` `` — Telegram's Markdown swallows `[...]` otherwise.\n"
     "- Possible section headers IN THIS ORDER: *Today*, *Email*, "
     "*Pending replies*, *Calendar*, *Open follow-ups*, *Suggestions*, *Warnings*.\n"
     "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
@@ -208,7 +217,7 @@ PROMPT_TEMPLATE = (
     "something useful. If the events with attendees have no email_context, "
     "no sub-bullet.\n"
     "\n"
-    "*Open follow-ups* — one bullet per item: `- <body> (due_human) [followup:N]`.\n"
+    "*Open follow-ups* — one bullet per item: ``- <body> (due_human) `[followup:N]` ``.\n"
     "\n"
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
     "These are NOT things you (TARS) are doing — just things the user could "
@@ -260,11 +269,12 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     # Calendar first so we know which attendees to enrich with email context.
     cal, cal_err = await _safe_calendar()
+    self_email = await get_self_email()  # cached after first call
     attendee_set: set[str] = set()
     for ev in cal:
         for raw in (ev.get("attendees") or []):
             addr = extract_email_addr(raw)
-            if addr and "@" in addr:
+            if addr and "@" in addr and addr != self_email:
                 attendee_set.add(addr)
 
     intel, email_err = await _safe_email_intel(now, sorted(attendee_set))
@@ -279,6 +289,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
         ctx: list[dict] = []
         for raw in (ev.get("attendees") or []):
             addr = extract_email_addr(raw)
+            if addr == self_email:
+                continue
             for m in (by_att.get(addr) or [])[:3]:
                 ctx.append({
                     "from": m["from"], "subject": m["subject"],
