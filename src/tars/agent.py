@@ -124,16 +124,47 @@ class Agent:
         user_text: str,
         tier: str = "interactive_fast",
         tool_loop_max: int = TOOL_LOOP_MAX,
+        auto_search: bool = True,
     ) -> dict[str, Any]:
         await self._ensure_thread(thread_key)
         history = await self._load_history(thread_key)
 
-        # The frozen prefix MUST sit at index 0. History tails. User input is the
-        # final element. Do not f-string anything into SYSTEM_BLOCK.
+        # Pre-search every chat turn: the LLM keeps "skipping" search_memory
+        # for short factual questions ("what is PARA?") even with explicit
+        # prompt rules. We do the search programmatically, append a synthetic
+        # tool round to messages so the LLM sees the results without having
+        # had to "remember" to fetch them. Skips for very short or non-
+        # questiony inputs (greetings, single-word commands) to save cost.
+        presearch_block: str | None = None
+        if auto_search and _looks_like_question(user_text):
+            try:
+                presearch_block = await run_tool(
+                    self.db, "search_memory",
+                    json.dumps({"query": user_text[:300], "k": 5}),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("pre-search failed (%s); continuing without", e)
+
+        # The frozen prefix MUST sit at index 0. History tails. User input is
+        # the final element. Pre-search results (if any) ride INSIDE the user
+        # turn as a system-tagged bracket so the LLM treats them as authoritative
+        # context — and so verified_note_ids picks up their ids from the same
+        # bytes that get sent to the model.
+        injected_user_text = user_text
+        if presearch_block:
+            injected_user_text = (
+                f"{user_text}\n\n"
+                f"[system pre-search of your memory for this query — use these "
+                f"results if relevant, ignore if not. cite [note:N] only for ids "
+                f"that appear below.]\n{presearch_block}"
+            )
+
         messages: list[dict] = [{"role": "system", "content": SYSTEM_BLOCK}]
         messages.extend(history)
-        messages.append({"role": "user", "content": user_text})
+        messages.append({"role": "user", "content": injected_user_text})
 
+        # Persist the ORIGINAL user_text (not the injected one) so the saved
+        # history stays clean and the cache anchor stays stable.
         await self._save_turn(thread_key, "user", user_text)
 
         # Track every note id that a tool surfaced this turn — used by the
@@ -144,7 +175,9 @@ class Agent:
         # `"id": N` for each note already retrieved, and the LLM is free to
         # cite those without needing a tool call to "re-verify" them.
         verified_note_ids: set[int] = set()
-        for m in _NOTE_ID_IN_TOOL_RESULT_RE.finditer(user_text):
+        # Scan the FULL injected_user_text (includes pre-search results) so
+        # the guardrail trusts those ids for citation.
+        for m in _NOTE_ID_IN_TOOL_RESULT_RE.finditer(injected_user_text):
             try:
                 verified_note_ids.add(int(m.group(1)))
             except ValueError:
@@ -281,6 +314,36 @@ class Agent:
                 "provider": "",
                 "steps": tool_loop_max,
             }
+
+
+_QUESTION_WORDS_RE = re.compile(
+    r"\b(what|who|when|where|why|how|which|whose|whom|"
+    r"is|are|was|were|do|does|did|can|could|should|would|will|may|might|"
+    r"מה|מי|איפה|איך|מתי|למה|כמה|האם)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """Heuristic: is this user input likely to benefit from a memory search?
+    Skips greetings, single-word commands, and 'note:'-style statements."""
+    t = (text or "").strip()
+    if not t or len(t) < 4:
+        return False
+    # Lower-cost guards: statements that shouldn't trigger search.
+    low = t.lower()
+    if low.startswith(("note:", "add note:", "take note:", "new note:",
+                       "note this:", "/", "הערה:", "רשום:", "הוסף הערה:")):
+        return False
+    # Questions: punctuation or interrogative words anywhere; or >4 words
+    # (most non-trivial inputs are questions or requests worth searching).
+    if "?" in t or "؟" in t:
+        return True
+    if _QUESTION_WORDS_RE.search(t):
+        return True
+    if len(t.split()) >= 4:
+        return True
+    return False
 
 
 def _strip_unverified_note_citations(
