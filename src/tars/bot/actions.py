@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
-from tars.memory.follow_ups import open_followup
+from tars.memory.follow_ups import close_followup, open_followup
 from tars.tools import save_note as tool_save_note
 
 log = logging.getLogger("tars.bot.actions")
@@ -289,6 +289,237 @@ async def handle_custom_remind_reply(message, agent, cfg) -> bool:
     preview = suggestion_text[:60] + ("…" if len(suggestion_text) > 60 else "")
     await message.reply(
         f"✓ Reminder set {due_human} for: _{preview}_\n[note:{note_id}] [followup:{fu_id}]",
+        parse_mode="Markdown",
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Follow-up due-time nudges (sent by scheduler/followup_due_scan.py)
+# ---------------------------------------------------------------------------
+#
+# Callback data format: fu:<verb>:<followup_id>
+#   d  → done    (close follow-up; auto-creates resolving "marked done" note)
+#   s1 → snooze 1h
+#   s9 → snooze to tomorrow 09:00 local
+#   sc → snooze custom (ForceReply prompt → dateparser)
+#
+# We piggyback on `pending_actions` to track the ForceReply state for custom
+# snoozes — same mechanism as briefing-suggestion custom reminders.
+
+
+def build_followup_nudge_keyboard(fu_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Done",      callback_data=f"fu:d:{fu_id}"),
+        InlineKeyboardButton(text="⏰ +1h",       callback_data=f"fu:s1:{fu_id}"),
+        InlineKeyboardButton(text="⏰ Tomorrow",  callback_data=f"fu:s9:{fu_id}"),
+        InlineKeyboardButton(text="⏰ Custom",    callback_data=f"fu:sc:{fu_id}"),
+    ]])
+
+
+async def _snooze_followup(db, fu_id: int, new_due_ts: int) -> None:
+    """Move due_at forward. last_nudged_at stays where it is so the row
+    becomes eligible for re-nudge once new_due_ts passes (because then
+    last_nudged_at < due_at again)."""
+    await db.execute(
+        "UPDATE follow_ups SET due_at = ? WHERE id = ? AND status = 'open'",
+        (int(new_due_ts), int(fu_id)),
+    )
+
+
+async def _close_followup_with_synthetic_note(
+    db, fu_id: int, original_body: str, tz_name: str,
+) -> int:
+    """Close a follow-up via the citation-gated path. We can't just flip the
+    status — close_followup() requires a resolving note. Create one
+    automatically so the audit trail stays honest."""
+    now_local = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M")
+    body = (
+        f"Marked done via reminder ping at {now_local}.\n"
+        f"Original: {original_body[:200]}"
+    )
+    r = json.loads(await tool_save_note(
+        db, {"body": body, "tags": ["source/reminder-ping", "auto/closed"]},
+    ))
+    note_id = int(r["note_id"])
+    await close_followup(db, followup_id=fu_id, resolving_note_id=note_id)
+    return note_id
+
+
+async def handle_followup_nudge_callback(callback, bot: Bot, agent, cfg) -> None:
+    """Route fu:* callback queries fired from a reminder nudge message."""
+    data = (callback.data or "").strip()
+    try:
+        _, verb, fu_str = data.split(":", 2)
+        fu_id = int(fu_str)
+    except (ValueError, IndexError):
+        await callback.answer("bad data")
+        return
+
+    row = await agent.db.fetch_one(
+        "SELECT id, note_id, status, due_at FROM follow_ups WHERE id = ?",
+        (fu_id,),
+    )
+    if row is None:
+        await callback.answer("follow-up gone")
+        return
+    if row["status"] != "open":
+        await callback.answer(f"already {row['status']}")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    note_row = await agent.db.fetch_one(
+        "SELECT body FROM notes WHERE id = ?", (int(row["note_id"]),)
+    )
+    original_body = (note_row["body"] if note_row else "") or ""
+    tz = ZoneInfo(cfg.timezone)
+    now_dt = datetime.now(tz)
+    status_text = ""
+
+    try:
+        if verb == "d":
+            resolving = await _close_followup_with_synthetic_note(
+                agent.db, fu_id, original_body, cfg.timezone,
+            )
+            status_text = f"✅ done [note:{resolving}]"
+
+        elif verb == "s1":
+            new_due = now_dt + timedelta(hours=1)
+            await _snooze_followup(agent.db, fu_id, int(new_due.timestamp()))
+            status_text = f"⏰ snoozed → {new_due.strftime('%a %H:%M')}"
+
+        elif verb == "s9":
+            new_due = (now_dt + timedelta(days=1)).replace(
+                hour=9, minute=0, second=0, microsecond=0,
+            )
+            await _snooze_followup(agent.db, fu_id, int(new_due.timestamp()))
+            status_text = f"⏰ snoozed → {new_due.strftime('%a %Y-%m-%d %H:%M')}"
+
+        elif verb == "sc":
+            # ForceReply prompt — user replies with a free-text time.
+            # We piggyback on pending_actions for the reply-tracking state.
+            prompt = (
+                f"⏰ Snooze until when?\n_{original_body[:200]}_\n\n"
+                f"Reply with a time — e.g. `in 30 min`, `tomorrow 9am`, "
+                f"`friday 5pm`, `2026-06-15 14:00`."
+            )
+            sent = await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=prompt,
+                parse_mode="Markdown",
+                reply_markup=ForceReply(
+                    input_field_placeholder="e.g. tomorrow 9am", selective=True,
+                ),
+            )
+            extra = json.dumps({"fu_id": fu_id})
+            await agent.db.execute(
+                "INSERT INTO pending_actions("
+                " chat_id, kind, text, extra, created_at, "
+                " awaiting_kind, prompt_message_id) "
+                "VALUES (?, 'followup_snooze', ?, ?, ?, 'followup_snooze', ?)",
+                (int(callback.message.chat.id), original_body[:200], extra,
+                 int(time.time()), sent.message_id),
+            )
+            await callback.answer("Reply with the time")
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        else:
+            status_text = f"unknown verb {verb!r}"
+
+    except Exception as e:  # noqa: BLE001
+        log.exception("followup nudge %s for fu=%d failed", verb, fu_id)
+        status_text = f"error: {type(e).__name__}"
+
+    # Replace the keyboard with a single status pill.
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=status_text, callback_data=f"fu:done:{fu_id}")
+            ]]),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("edit_message_reply_markup (nudge) failed: %s", e)
+    await callback.answer(status_text)
+
+
+async def handle_followup_snooze_reply(message, agent, cfg) -> bool:
+    """If the user's message is a reply to a "Snooze until when?" prompt,
+    parse the time deterministically and move the follow-up's due_at.
+
+    Returns True if handled (so the bot's free-chat handler skips it)."""
+    if message.reply_to_message is None:
+        return False
+    prompt_msg_id = message.reply_to_message.message_id
+    row = await agent.db.fetch_one(
+        "SELECT id, extra FROM pending_actions "
+        "WHERE awaiting_kind = 'followup_snooze' AND prompt_message_id = ? "
+        "  AND consumed_at IS NULL",
+        (prompt_msg_id,),
+    )
+    if row is None:
+        return False
+
+    sid = int(row["id"])
+    try:
+        extra = json.loads(row["extra"] or "{}")
+    except json.JSONDecodeError:
+        extra = {}
+    fu_id = int(extra.get("fu_id") or 0)
+    if not fu_id:
+        await message.reply("internal: snooze prompt missing fu_id")
+        return True
+
+    user_time = (message.text or "").strip()
+    import dateparser
+    tz = ZoneInfo(cfg.timezone)
+    dt = dateparser.parse(
+        user_time,
+        settings={
+            "TIMEZONE": cfg.timezone,
+            "TO_TIMEZONE": cfg.timezone,
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    if dt is None:
+        await message.reply(
+            f"Couldn't parse `{user_time}` as a time. Try `in 2 hours`, "
+            f"`tomorrow 9am`, or `2026-06-15 14:00`. Reply to the same "
+            f"prompt to try again.",
+            parse_mode="Markdown",
+        )
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+
+    now_dt = datetime.now(tz)
+    if (now_dt - dt).total_seconds() > 300:
+        await message.reply(
+            f"`{user_time}` resolves to {dt.strftime('%a %Y-%m-%d %H:%M')} "
+            f"which is in the past. Reply with a future time.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    await _snooze_followup(agent.db, fu_id, int(dt.timestamp()))
+    await agent.db.execute(
+        "UPDATE pending_actions SET consumed_at = ?, consumed_action = 'sc', "
+        " consumed_result = ? WHERE id = ?",
+        (
+            int(time.time()),
+            json.dumps({"fu_id": fu_id, "new_due_iso": dt.isoformat()}),
+            sid,
+        ),
+    )
+    await message.reply(
+        f"⏰ Snoozed [followup:{fu_id}] → {dt.strftime('%a %Y-%m-%d %H:%M')}",
         parse_mode="Markdown",
     )
     return True

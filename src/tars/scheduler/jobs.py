@@ -24,6 +24,7 @@ from tars.scheduler.cooldown_clear import cooldown_clear_job
 from tars.scheduler.cost_rollup_daily import cost_rollup_daily_job
 from tars.scheduler.email_summary import email_summary_job
 from tars.scheduler.entity_dedup import entity_dedup_job
+from tars.scheduler.followup_due_scan import followup_due_scan_job
 from tars.scheduler.lab_notebook_digest import lab_notebook_digest_job
 from tars.scheduler.morning_briefing import morning_briefing_job
 from tars.scheduler.news_sources_refresh import news_sources_refresh_job
@@ -84,6 +85,15 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
         brain_reindex_job,
         IntervalTrigger(minutes=15),
         id="brain_reindex",
+        replace_existing=True,
+    )
+
+    # Every 2 min — ping Telegram for any open follow-up whose due_at has
+    # passed and hasn't been nudged yet. Idempotent via last_nudged_at.
+    sched.add_job(
+        followup_due_scan_job,
+        IntervalTrigger(minutes=2),
+        id="followup_due_scan",
         replace_existing=True,
     )
 
