@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from tars.integrations.gcal import fetch_upcoming
-from tars.integrations.gmail import fetch_unread_since
+from tars.integrations.gmail import extract_email_addr, gather_briefing_intel
 from tars.memory.follow_ups import list_open
 
 log = logging.getLogger("tars.scheduler.morning_briefing")
@@ -58,20 +58,48 @@ def _extract_suggestions(briefing_text: str) -> list[str]:
     log.info("morning_briefing: parsed %d suggestion(s) from output", len(items))
     return items
 
-OVERNIGHT_HOURS = 12
-CAL_LOOKAHEAD = 5
+OVERNIGHT_HOURS = 24            # was 12 — catches eve emails the user slept through
+CAL_LOOKAHEAD = 6               # today's events; raised from 5 for fuller picture
 FOLLOWUP_HORIZON_DAYS = 7
+PENDING_REPLY_STALE_DAYS = 4    # treat unread > 4d as "you owe a reply"
 
 
-async def _safe_gmail(now: int) -> tuple[list[dict], str | None]:
+async def _safe_email_intel(
+    now: int, attendees: list[str],
+) -> tuple[dict, str | None]:
+    """Single call that pulls overnight unread + stale pending replies +
+    per-attendee email context. Returns ({...}, error_or_None)."""
     since = now - OVERNIGHT_HOURS * 3600
     try:
-        # include_body=True so the LLM has real content to summarize and
-        # extract action items from — not just snippets.
-        return await fetch_unread_since(since, max_results=12, include_body=True), None
+        intel = await gather_briefing_intel(
+            overnight_since_ts=since,
+            attendee_addresses=attendees,
+            pending_stale_days=PENDING_REPLY_STALE_DAYS,
+        )
+        return intel, None
     except Exception as e:  # noqa: BLE001
-        log.warning("morning_briefing: gmail fetch degraded (%s)", e)
-        return [], f"gmail unavailable: {type(e).__name__}"
+        log.warning("morning_briefing: gmail intel degraded (%s)", e)
+        return (
+            {"overnight_unread": [], "pending_replies": [], "by_attendee": {}},
+            f"gmail unavailable: {type(e).__name__}",
+        )
+
+
+async def _yesterday_summary(db, today_iso: str) -> str | None:
+    """Fetch yesterday's briefing summary if it exists, trimmed for the prompt.
+    Used so the LLM doesn't repeat yesterday's takeaways verbatim."""
+    from datetime import date, timedelta
+    try:
+        y = (date.fromisoformat(today_iso) - timedelta(days=1)).isoformat()
+        row = await db.fetch_one(
+            "SELECT summary FROM briefings WHERE date = ?", (y,)
+        )
+        if row and row["summary"]:
+            # Keep it short — we only want the LLM to know "you said X yesterday".
+            return (row["summary"] or "")[:1500]
+    except Exception as e:  # noqa: BLE001
+        log.warning("yesterday-summary lookup failed (%s)", e)
+    return None
 
 
 async def _safe_calendar() -> tuple[list[dict], str | None]:
@@ -136,49 +164,73 @@ async def _safe_followups(db, now_dt: datetime) -> list[dict]:
 
 
 PROMPT_TEMPLATE = (
-    "Compose today's morning briefing in TARS voice.\n"
+    "Compose today's morning briefing in TARS voice. You are not summarizing "
+    "feeds — you are reasoning over the user's morning and telling him what "
+    "actually matters today.\n"
     "\n"
     "STRICT format rules:\n"
-    "- Render ONLY sections whose JSON key is present in the payload. If a "
-    "section's data is absent below, do not write its header at all.\n"
-    "- Possible section headers (only when data exists): *Email*, *Calendar*, "
-    "*Open follow-ups*, *Suggestions*, *Warnings*.\n"
-    "- Section headers use SINGLE asterisks like `*Email*` (Telegram Markdown). "
-    "Never `**double**` — Telegram renders that literally.\n"
+    "- Render ONLY sections whose data is present below. If absent, OMIT the "
+    "header entirely. Better silent than padded.\n"
+    "- Possible section headers IN THIS ORDER: *Today*, *Email*, "
+    "*Pending replies*, *Calendar*, *Open follow-ups*, *Suggestions*, *Warnings*.\n"
+    "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
+    "Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
+    "- Do NOT repeat anything verbatim from `yesterday_summary` (provided for "
+    "context only — so today doesn't sound like a copy of yesterday).\n"
     "\n"
-    "*Email* — one bullet per email starting with `- `:\n"
-    "  `- <From shortened to name or org> — <one-line summary of what the email actually says, not just the subject>`\n"
-    "  Read the body. Mention concrete facts (numbers, deadlines, names) the user "
-    "should know. Skip footer/unsubscribe/legalese. Skip purely promotional fluff "
-    "but DO mention if a newsletter has 1-2 things worth noticing.\n"
+    "*Today* — REQUIRED IF the payload is non-trivial. 1-3 short lines "
+    "synthesizing what the day is actually about. Connect the dots: if a "
+    "meeting has unread email from the attendee, say so. If a follow-up is "
+    "due today, lead with it. This is the line the user reads first — make "
+    "it earn its place. If nothing meaningful, skip this section.\n"
     "\n"
-    "*Calendar* — one bullet per event: `- HH:MM — Title` if today, else `- YYYY-MM-DD HH:MM — Title`.\n"
+    "*Email* — one bullet per overnight unread email starting with `- `:\n"
+    "  `- <From shortened to name or org> — <one-line summary of what the "
+    "email actually says, not just the subject>`\n"
+    "  Read the body. Mention concrete facts (numbers, deadlines, names) the "
+    "user should know. Skip footer/unsubscribe/legalese. Skip pure promo "
+    "fluff but DO mention 1-2 useful items from a newsletter if there are any.\n"
+    "\n"
+    "*Pending replies* — emails sitting unread for "
+    f"{PENDING_REPLY_STALE_DAYS}+ days from real people (not lists). One "
+    "bullet each: `- <From> — <Subject> (Nd ago)`. ONLY include if the "
+    "sender seems to actually expect a reply. Skip if all of pending_replies "
+    "are noise.\n"
+    "\n"
+    "*Calendar* — one bullet per event:\n"
+    "  `- HH:MM — Title` (today) or `- YYYY-MM-DD HH:MM — Title` (other day).\n"
+    "  If an event has `email_context`, add an INDENTED sub-bullet RIGHT "
+    "BELOW it:\n"
+    "  `   · prep: <1-line synthesis of the recent email thread with this "
+    "attendee — what did they last say, what are they likely to ask?>`\n"
+    "  Only add the prep line when the email_context actually contains "
+    "something useful. If the events with attendees have no email_context, "
+    "no sub-bullet.\n"
     "\n"
     "*Open follow-ups* — one bullet per item: `- <body> (due_human) [followup:N]`.\n"
     "\n"
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
-    "These are NOT things you (TARS) are doing — just things the user could ask "
-    "you to do. Format as a numbered list, plain language. No verb prefixes like "
-    "'Reply:' or 'note:' or 'remind me to'. NO hashtags in suggestions — they "
-    "render poorly in Telegram and tags are auto-applied to saved notes anyway.\n"
+    "These are NOT things you (TARS) are doing — just things the user could "
+    "ask you to do. Numbered list, plain language. No verb prefixes like "
+    "'Reply:' or 'note:' or 'remind me to'. NO hashtags — tags are "
+    "auto-applied to saved notes already.\n"
     "Example:\n"
-    "  1. Open a Portuguese Revolut local account — Revolut email mentioned smoother cross-border payments\n"
+    "  1. Open a Portuguese Revolut local account — Revolut email mentioned "
+    "smoother cross-border payments\n"
     "  2. Reply to Sarah re Q3 budget — she's asking by Thursday\n"
-    "  3. Read Globerman's piece this weekend\n"
     "\n"
     "FILTER STRICTLY. Include only items that:\n"
-    "  - Require an actual decision, reply, or time-sensitive action from the user\n"
+    "  - Require an actual decision, reply, or time-sensitive action\n"
     "  - Mention a deadline, ask a question, or propose something significant\n"
-    "Skip ALL of these:\n"
+    "Skip ALL of:\n"
     "  - Log/archive/track a receipt (\"Wolt receipt 316.90\" — NOT a suggestion)\n"
-    "  - Fill out routine forms (\"daily activity tracker\" — too noisy)\n"
-    "  - Newsletters / promotional content / one-way notifications\n"
-    "  - Reminders to read/check generic content unless the user explicitly cares\n"
+    "  - Routine forms (\"daily activity tracker\" — too noisy)\n"
+    "  - Newsletters / promotional / one-way notifications\n"
+    "  - Reminders to read generic content unless the user explicitly cares\n"
     "  - Anything the user obviously already knows or has handled\n"
-    "If after filtering there are zero items worth suggesting, OMIT the entire "
-    "*Suggestions* section. Better silent than noisy.\n"
-    "No footer line below the list — the user has tap-to-act buttons attached.\n"
+    "If zero items pass the filter, OMIT the entire *Suggestions* section.\n"
+    "No footer line — the user has tap-to-act buttons attached.\n"
     "\n"
     "*Warnings* — one line per warning, terse.\n"
     "\n"
@@ -206,18 +258,61 @@ async def morning_briefing(agent, db, cfg) -> dict:
     today = now_dt.date().isoformat()
     log.info("morning_briefing: running for date=%s", today)
 
-    emails, email_err = await _safe_gmail(now)
+    # Calendar first so we know which attendees to enrich with email context.
     cal, cal_err = await _safe_calendar()
+    attendee_set: set[str] = set()
+    for ev in cal:
+        for raw in (ev.get("attendees") or []):
+            addr = extract_email_addr(raw)
+            if addr and "@" in addr:
+                attendee_set.add(addr)
+
+    intel, email_err = await _safe_email_intel(now, sorted(attendee_set))
     fus = await _safe_followups(db, now_dt)
+    yesterday = await _yesterday_summary(db, today)
     warnings = [w for w in (email_err, cal_err) if w]
 
-    # Build payload skipping empty sections — the LLM only renders headers
-    # for keys actually present.
+    # Cross-reference: attach by_attendee context onto each calendar event.
+    by_att = intel.get("by_attendee") or {}
+    enriched_cal: list[dict] = []
+    for ev in cal:
+        ctx: list[dict] = []
+        for raw in (ev.get("attendees") or []):
+            addr = extract_email_addr(raw)
+            for m in (by_att.get(addr) or [])[:3]:
+                ctx.append({
+                    "from": m["from"], "subject": m["subject"],
+                    "date": m["date"], "snippet": m["snippet"],
+                })
+        ev_out = dict(ev)
+        if ctx:
+            ev_out["email_context"] = ctx
+        enriched_cal.append(ev_out)
+
+    # Annotate pending replies with how stale each one is so the LLM can
+    # phrase the urgency correctly.
+    pending: list[dict] = []
+    for m in (intel.get("pending_replies") or []):
+        ts = m.get("internal_ts") or 0
+        days_old = max(1, int((now - ts) / 86400)) if ts else None
+        pending.append({
+            "from": m["from"], "subject": m["subject"],
+            "date": m["date"], "snippet": m["snippet"],
+            "days_old": days_old,
+        })
+
+    emails = intel.get("overnight_unread") or []
+
+    # Build payload — drop empty keys so the LLM omits their headers entirely.
     payload: dict[str, Any] = {"date": today}
+    if yesterday:
+        payload["yesterday_summary"] = yesterday
     if emails:
         payload["emails"] = emails
-    if cal:
-        payload["calendar"] = cal
+    if pending:
+        payload["pending_replies"] = pending
+    if enriched_cal:
+        payload["calendar"] = enriched_cal
     if fus:
         payload["open_followups"] = fus
     if warnings:
@@ -280,14 +375,19 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     elapsed = time.time() - t0
     log.info(
-        "morning_briefing: done date=%s emails=%d cal=%d followups=%d sent=%d elapsed=%.2fs cost=$%.6f",
-        today, len(emails), len(cal), len(fus), sent, elapsed, out.get("cost_usd", 0.0),
+        "morning_briefing: done date=%s emails=%d pending=%d cal=%d att=%d "
+        "followups=%d yest=%s sent=%d elapsed=%.2fs cost=$%.6f",
+        today, len(emails), len(pending), len(cal), len(attendee_set),
+        len(fus), bool(yesterday), sent, elapsed, out.get("cost_usd", 0.0),
     )
     return {
         "date": today,
         "emails": len(emails),
+        "pending_replies": len(pending),
         "calendar": len(cal),
+        "attendees_enriched": sum(1 for e in enriched_cal if e.get("email_context")),
         "followups": len(fus),
+        "yesterday_carried": bool(yesterday),
         "sent": sent,
         "elapsed_s": elapsed,
         "cost_usd": out.get("cost_usd", 0.0),
