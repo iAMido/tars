@@ -308,8 +308,15 @@ def _strip_unverified_note_citations(
 
     def _sub(m: re.Match[str]) -> str:
         nid = int(m.group(1))
-        return "[note:?unverified]" if nid in bogus else m.group(0)
+        # Drop the bogus token entirely (and a single leading space if any) so
+        # the surrounding prose reads naturally. Leave verified citations alone.
+        return "" if nid in bogus else m.group(0)
 
     cleaned = _NOTE_CITE_RE.sub(_sub, text)
-    return cleaned.rstrip() + "\n\n⚠ Some note ids in this reply were not actually verified by a tool call. Re-ask if you need confirmation."
+    # Tidy: collapse double spaces left by the deletion + trim trailing
+    # whitespace before sections.
+    cleaned = re.sub(r" {2,}", " ", cleaned).rstrip()
+    n = len(bogus)
+    plural = "s" if n != 1 else ""
+    return cleaned + f"\n\n_(⚠ {n} unverified citation{plural} removed)_"
 
