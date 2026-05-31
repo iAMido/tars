@@ -37,12 +37,14 @@ HISTORY_LIMIT = 40
 #   Citations from search_memory / get_note / save_note results are trusted.
 _NOTE_CITE_RE = re.compile(r"\[note:(\d+)\]")
 _NOTE_ID_IN_TOOL_RESULT_RE = re.compile(r'"(?:note_id|doc_id|id)"\s*:\s*(\d+)')
-# Interactive chat: 4 iterations covers the longest legitimate flow,
-# the follow-up creation: save_note -> get_current_time -> open_followup -> final.
-# Anything past 4 typically means the model is stuck or thrashing. The router's
-# max_tokens cap (TIER_MAX_TOKENS) keeps each individual turn bounded.
+# Interactive chat. Legitimate longest flows:
+#   open_reminder:  save_note -> get_current_time -> open_followup -> final = 4
+#   close_reminder: search_memory -> list_followups -> save_note ->
+#                   close_followup -> final = 5
+# Plus headroom for an exploratory search at the start. Beyond 6 the model is
+# usually thrashing. Router's max_tokens cap bounds each individual turn.
 # /research can override with a larger value via the chat() parameter.
-TOOL_LOOP_MAX = 4
+TOOL_LOOP_MAX = 6
 
 
 class Agent:
@@ -219,18 +221,57 @@ class Agent:
                 "steps": step + 1,
             }
 
-        # Loop exhausted — apply the citation guardrail before returning so a
-        # truncated answer can't smuggle hallucinated note ids either.
-        # (Loop-exhausted path doesn't have a clean resp; just return generic.)
-        log.warning("tool loop exhausted for thread %s", thread_key)
-        return {
-            "text": "Tool loop exhausted before reaching a final answer.",
-            "cached_tokens": 0,
-            "cost_usd": total_cost,
-            "model": "",
-            "provider": "",
-            "steps": tool_loop_max,
-        }
+        # Loop exhausted. The model spent every iteration calling tools and
+        # never produced a user-facing reply. The tools may well have
+        # SUCCEEDED (e.g. close_followup committed) — so returning a bare
+        # "exhausted" string would lie to the user. Do ONE final tools-off
+        # call to force a text summary based on the tool results in context.
+        log.warning(
+            "tool loop exhausted for thread %s — forcing final text turn", thread_key,
+        )
+        try:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[system] Tool budget exhausted. Summarize what you "
+                    "actually accomplished in 1-2 short lines, TARS voice. "
+                    "No more tool calls."
+                ),
+            })
+            final_resp: LLMResponse = await call(
+                messages=messages,
+                tools=None,           # tools=None ⇒ tool_choice not sent ⇒ text only
+                tier=tier,
+                cfg=self.cfg,
+                db=self.db,
+                thread_key=thread_key,
+            )
+            total_cost += final_resp.cost_usd
+            final_text = _strip_unverified_note_citations(
+                final_resp.text or "Done.", verified_note_ids, thread_key,
+            )
+            await self._save_turn(
+                thread_key, "assistant", final_text,
+                model=final_resp.model, cost=final_resp.cost_usd, tier=tier,
+            )
+            return {
+                "text": final_text,
+                "cached_tokens": final_resp.cached_tokens,
+                "cost_usd": total_cost,
+                "model": final_resp.model,
+                "provider": final_resp.provider,
+                "steps": tool_loop_max + 1,
+            }
+        except Exception as e:  # noqa: BLE001
+            log.exception("forced-final call failed (%s); returning generic", e)
+            return {
+                "text": "Done (tool budget exhausted before I could summarize).",
+                "cached_tokens": 0,
+                "cost_usd": total_cost,
+                "model": "",
+                "provider": "",
+                "steps": tool_loop_max,
+            }
 
 
 def _strip_unverified_note_citations(
