@@ -28,6 +28,8 @@ from tars.integrations.gmail import (
     get_self_email,
 )
 from tars.memory.follow_ups import list_open
+from tars.memory.search import hybrid_search
+from tars.tools import _get_embedder
 
 log = logging.getLogger("tars.scheduler.morning_briefing")
 
@@ -66,6 +68,11 @@ OVERNIGHT_HOURS = 24            # was 12 — catches eve emails the user slept t
 CAL_LOOKAHEAD = 6               # today's events; raised from 5 for fuller picture
 FOLLOWUP_HORIZON_DAYS = 7
 PENDING_REPLY_STALE_DAYS = 4    # treat unread > 4d as "you owe a reply"
+RECENT_NOTES_HOURS = 36         # everything jotted in the last day-and-a-half
+RECENT_NOTES_MAX = 20
+RELEVANT_NOTES_MAX = 10         # semantic retrieval cap (after recent_notes dedup)
+RELEVANT_NOTES_PER_QUERY_K = 3  # top-k per individual context query
+NOTE_BODY_MAX = 400             # per-note body truncation for prompt
 
 
 async def _safe_email_intel(
@@ -87,6 +94,88 @@ async def _safe_email_intel(
             {"overnight_unread": [], "pending_replies": [], "by_attendee": {}},
             f"gmail unavailable: {type(e).__name__}",
         )
+
+
+async def _recent_notes(db, now_ts: int) -> list[dict]:
+    """Last 36h of notes, body included. Always-on context — the LLM should
+    know what the user has been thinking about, even if no semantic search
+    surfaces it. Excludes auto-generated reminder-close notes (noise)."""
+    cutoff = now_ts - RECENT_NOTES_HOURS * 3600
+    try:
+        rows = await db.fetch_all(
+            "SELECT id, datetime(created_at,'unixepoch','localtime') AS created, "
+            "       body, tags "
+            "FROM notes "
+            "WHERE created_at >= ? "
+            "  AND status != 'closed' "
+            "  AND (tags IS NULL OR tags NOT LIKE '%source/reminder-ping%') "
+            "ORDER BY created_at DESC LIMIT ?",
+            (cutoff, RECENT_NOTES_MAX),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("recent_notes query failed (%s)", e)
+        return []
+    out: list[dict] = []
+    for r in rows:
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except json.JSONDecodeError:
+            tags = []
+        out.append({
+            "id": int(r["id"]),
+            "created": r["created"],
+            "body": (r["body"] or "")[:NOTE_BODY_MAX],
+            "tags": tags,
+        })
+    return out
+
+
+async def _relevant_notes_for_today(
+    db, cfg, queries: list[str], exclude_ids: set[int],
+) -> list[dict]:
+    """For each query (calendar title / email subject / follow-up body),
+    semantically retrieve top-k notes. Dedupe, exclude ids already in
+    recent_notes, cap globally. Returns a small set the LLM can use to
+    connect today's items to past thinking."""
+    if not queries:
+        return []
+    try:
+        embedder = _get_embedder(db, cfg)
+    except Exception as e:  # noqa: BLE001
+        log.warning("relevant_notes: embedder unavailable (%s)", e)
+        return []
+
+    seen: dict[int, dict] = {}
+    for q in queries:
+        q = (q or "").strip()
+        if not q or len(q) < 4:
+            continue
+        try:
+            hits = await hybrid_search(
+                db, embedder, query=q, k=RELEVANT_NOTES_PER_QUERY_K,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("relevant_notes search %r failed (%s)", q[:40], e)
+            continue
+        for h in hits:
+            if h.get("source") != "note":
+                continue
+            doc_id = int(h.get("doc_id") or 0)
+            if doc_id in exclude_ids or doc_id in seen:
+                continue
+            seen[doc_id] = {
+                "id": doc_id,
+                "title": h.get("title") or "",
+                "body": (h.get("body") or "")[:NOTE_BODY_MAX],
+                "matched_query": q[:80],
+                "score": round(float(h.get("score") or 0.0), 4),
+            }
+            if len(seen) >= RELEVANT_NOTES_MAX:
+                break
+        if len(seen) >= RELEVANT_NOTES_MAX:
+            break
+    # Best matches first.
+    return sorted(seen.values(), key=lambda x: x["score"], reverse=True)
 
 
 async def _yesterday_summary(db, today_iso: str) -> str | None:
@@ -189,10 +278,18 @@ PROMPT_TEMPLATE = (
     "context only — so today doesn't sound like a copy of yesterday).\n"
     "\n"
     "*Today* — REQUIRED IF the payload is non-trivial. 1-3 short lines "
-    "synthesizing what the day is actually about. Connect the dots: if a "
-    "meeting has unread email from the attendee, say so. If a follow-up is "
-    "due today, lead with it. This is the line the user reads first — make "
-    "it earn its place. If nothing meaningful, skip this section.\n"
+    "synthesizing what the day is actually about. Connect the dots:\n"
+    "  - meeting + unread email from the attendee\n"
+    "  - follow-up due today\n"
+    "  - email subject that references a recent note (recent_notes or "
+    "relevant_notes)\n"
+    "  - recurring theme across notes/emails/meetings (e.g. \"three things "
+    "today all touch your Portugal move\")\n"
+    "When a connection involves a stored note, cite it inline with backticks: "
+    "`` `[note:N]` `` (e.g. \"meeting with Sarah re Q3 budget — you noted last "
+    "week she's pushing for a 15% cut `[note:42]`\"). This is the line the "
+    "user reads first — make it earn its place. If nothing meaningful, skip "
+    "this section.\n"
     "\n"
     "*Email* — one bullet per overnight unread email starting with `- `:\n"
     "  `- <From shortened to name or org> — <one-line summary of what the "
@@ -216,6 +313,9 @@ PROMPT_TEMPLATE = (
     "  Only add the prep line when the email_context actually contains "
     "something useful. If the events with attendees have no email_context, "
     "no sub-bullet.\n"
+    "  If a recent_note or relevant_note relates to this meeting (same "
+    "person, project, or topic), MENTION it in the prep line and cite "
+    "with `` `[note:N]` ``.\n"
     "\n"
     "*Open follow-ups* — one bullet per item: ``- <body> (due_human) `[followup:N]` ``.\n"
     "\n"
@@ -242,6 +342,18 @@ PROMPT_TEMPLATE = (
     "No footer line — the user has tap-to-act buttons attached.\n"
     "\n"
     "*Warnings* — one line per warning, terse.\n"
+    "\n"
+    "NOTES IN THE PAYLOAD — read carefully:\n"
+    "  - `recent_notes` = everything the user jotted in the last 36h. Use "
+    "this as context for what's on their mind. Don't list them as their "
+    "own section — instead weave them into *Today*, meeting prep, or "
+    "*Suggestions* when they connect.\n"
+    "  - `relevant_notes` = older notes that semantically match today's "
+    "calendar/email/follow-ups. Each has a `matched_query` showing WHY it "
+    "matched. Use it to surface forgotten context (\"you flagged this 3 "
+    "weeks ago\").\n"
+    "  - Only cite `[note:N]` when N actually appears in `recent_notes` or "
+    "`relevant_notes` payload below. Never invent ids.\n"
     "\n"
     "Payload:\n{payload}\n"
     "\n"
@@ -315,6 +427,30 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     emails = intel.get("overnight_unread") or []
 
+    # Notes context — what the user has been thinking about + which past
+    # notes connect to today's items.
+    recent_notes = await _recent_notes(db, now)
+    recent_ids = {n["id"] for n in recent_notes}
+    # Build semantic queries from today's surface area. We deliberately limit
+    # each item to a short string — the search is hybrid (FTS5 + vec), so
+    # short queries work fine and keep embedding cost negligible.
+    queries: list[str] = []
+    for ev in enriched_cal:
+        title = (ev.get("title") or "").strip()
+        if title and title not in queries:
+            queries.append(title)
+    for m in emails[:5]:
+        subj = (m.get("subject") or "").strip()
+        if subj and subj not in queries:
+            queries.append(subj)
+    for f in fus[:5]:
+        body = (f.get("body") or "").strip().split("\n")[0]
+        if body and body not in queries:
+            queries.append(body)
+    relevant_notes = await _relevant_notes_for_today(
+        db, cfg, queries, exclude_ids=recent_ids,
+    )
+
     # Build payload — drop empty keys so the LLM omits their headers entirely.
     payload: dict[str, Any] = {"date": today}
     if yesterday:
@@ -327,6 +463,10 @@ async def morning_briefing(agent, db, cfg) -> dict:
         payload["calendar"] = enriched_cal
     if fus:
         payload["open_followups"] = fus
+    if recent_notes:
+        payload["recent_notes"] = recent_notes
+    if relevant_notes:
+        payload["relevant_notes"] = relevant_notes
     if warnings:
         payload["warnings"] = warnings
 
@@ -388,9 +528,11 @@ async def morning_briefing(agent, db, cfg) -> dict:
     elapsed = time.time() - t0
     log.info(
         "morning_briefing: done date=%s emails=%d pending=%d cal=%d att=%d "
-        "followups=%d yest=%s sent=%d elapsed=%.2fs cost=$%.6f",
+        "followups=%d recent_notes=%d relevant_notes=%d yest=%s sent=%d "
+        "elapsed=%.2fs cost=$%.6f",
         today, len(emails), len(pending), len(cal), len(attendee_set),
-        len(fus), bool(yesterday), sent, elapsed, out.get("cost_usd", 0.0),
+        len(fus), len(recent_notes), len(relevant_notes), bool(yesterday),
+        sent, elapsed, out.get("cost_usd", 0.0),
     )
     return {
         "date": today,
@@ -399,6 +541,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
         "calendar": len(cal),
         "attendees_enriched": sum(1 for e in enriched_cal if e.get("email_context")),
         "followups": len(fus),
+        "recent_notes": len(recent_notes),
+        "relevant_notes": len(relevant_notes),
         "yesterday_carried": bool(yesterday),
         "sent": sent,
         "elapsed_s": elapsed,
