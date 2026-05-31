@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -27,6 +28,15 @@ from tars.tools import run_tool
 log = logging.getLogger("tars.agent")
 
 HISTORY_LIMIT = 40
+
+# Anti-hallucination guardrail.
+#   We saw the LLM reply "Noted. [note:17]" without ever calling save_note —
+#   the user thinks his note was saved, but nothing happened. Hard fix: after
+#   every chat turn, if the assistant cites a note id that was NOT produced or
+#   read by a tool call this turn, strip the citation and prepend a warning.
+#   Citations from search_memory / get_note / save_note results are trusted.
+_NOTE_CITE_RE = re.compile(r"\[note:(\d+)\]")
+_NOTE_ID_IN_TOOL_RESULT_RE = re.compile(r'"(?:note_id|doc_id|id)"\s*:\s*(\d+)')
 # Interactive chat: 4 iterations covers the longest legitimate flow,
 # the follow-up creation: save_note -> get_current_time -> open_followup -> final.
 # Anything past 4 typically means the model is stuck or thrashing. The router's
@@ -124,6 +134,11 @@ class Agent:
 
         await self._save_turn(thread_key, "user", user_text)
 
+        # Track every note id that a tool surfaced this turn — used by the
+        # citation guardrail at the end. Includes save_note returns,
+        # get_note returns, and any doc_id mentioned in search_memory hits.
+        verified_note_ids: set[int] = set()
+
         total_cost = 0.0
         for step in range(tool_loop_max):
             resp: LLMResponse = await call(
@@ -165,6 +180,14 @@ class Agent:
                     args = (tc.get("function") or {}).get("arguments") or "{}"
                     result = await run_tool(self.db, name, args)
                     log.info("tool=%s result=%s", name, result[:200])
+                    # Harvest any note ids the tool surfaced for the
+                    # citation guardrail below.
+                    if name in ("save_note", "get_note", "search_memory"):
+                        for m in _NOTE_ID_IN_TOOL_RESULT_RE.finditer(result):
+                            try:
+                                verified_note_ids.add(int(m.group(1)))
+                            except ValueError:
+                                pass
                     messages.append(
                         {
                             "role": "tool",
@@ -175,16 +198,20 @@ class Agent:
                 continue  # loop back into the LLM with tool results in context
 
             # No tool calls: this is the final assistant turn.
+            final_text = _strip_unverified_note_citations(
+                resp.text, verified_note_ids, thread_key,
+            )
+
             await self._save_turn(
                 thread_key,
                 "assistant",
-                resp.text,
+                final_text,
                 model=resp.model,
                 cost=resp.cost_usd,
                 tier=tier,
             )
             return {
-                "text": resp.text,
+                "text": final_text,
                 "cached_tokens": resp.cached_tokens,
                 "cost_usd": total_cost,
                 "model": resp.model,
@@ -192,7 +219,9 @@ class Agent:
                 "steps": step + 1,
             }
 
-        # Loop exhausted.
+        # Loop exhausted — apply the citation guardrail before returning so a
+        # truncated answer can't smuggle hallucinated note ids either.
+        # (Loop-exhausted path doesn't have a clean resp; just return generic.)
         log.warning("tool loop exhausted for thread %s", thread_key)
         return {
             "text": "Tool loop exhausted before reaching a final answer.",
@@ -202,3 +231,35 @@ class Agent:
             "provider": "",
             "steps": tool_loop_max,
         }
+
+
+def _strip_unverified_note_citations(
+    text: str, verified_ids: set[int], thread_key: str,
+) -> str:
+    """If the model cited any [note:N] for an id that was not surfaced by a
+    note-touching tool this turn, the id is unverified — likely hallucinated.
+
+    Action: replace the citation with `[note:?unverified]` and log loudly so
+    we can audit. We do NOT silently delete: the user should see that the
+    model claimed a note id, and we want to flag the claim as suspicious."""
+    if not text:
+        return text
+    cited = {int(m.group(1)) for m in _NOTE_CITE_RE.finditer(text)}
+    if not cited:
+        return text
+    bogus = cited - verified_ids
+    if not bogus:
+        return text
+
+    log.warning(
+        "citation guardrail: thread=%s bogus_ids=%s verified=%s — stripping",
+        thread_key, sorted(bogus), sorted(verified_ids),
+    )
+
+    def _sub(m: re.Match[str]) -> str:
+        nid = int(m.group(1))
+        return "[note:?unverified]" if nid in bogus else m.group(0)
+
+    cleaned = _NOTE_CITE_RE.sub(_sub, text)
+    return cleaned.rstrip() + "\n\n⚠ Some note ids in this reply were not actually verified by a tool call. Re-ask if you need confirmation."
+

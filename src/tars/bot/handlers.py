@@ -348,9 +348,25 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             log.exception("research failed")
             await m.answer(f"Research failed: {e}")
 
-    @dp.message(F.text.regexp(r"(?is)^\s*note\s*:\s*(.+)"), auth)
+    # Direct-save prefixes — bypass the LLM entirely.
+    # Matches: "note:", "add note:", "take note:", "new note:", "note this:",
+    # plus Hebrew "הערה:", "רשום:", "הוסף הערה:".
+    # The LLM was hallucinating "Noted. [note:N]" without actually calling
+    # save_note when the message didn't *start* with "note:" — the fast-path
+    # eliminates that whole risk surface.
+    NOTE_PREFIX_RE = (
+        r"(?is)^\s*(?:"
+        r"(?:add|take|new)\s+note"
+        r"|note(?:\s+this)?"
+        r"|הוסף\s+הערה"
+        r"|הערה"
+        r"|רשום"
+        r")\s*:\s*(.+)"
+    )
+
+    @dp.message(F.text.regexp(NOTE_PREFIX_RE), auth)
     async def _take_note(m: Message) -> None:
-        # Direct save_note — no LLM, no cost.
+        # Direct save_note — no LLM, no cost, no hallucination possible.
         body = (m.text or "").split(":", 1)[1].strip()
         if not body:
             await m.answer("Empty note. Try: note: bought milk")
