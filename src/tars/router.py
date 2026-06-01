@@ -146,6 +146,13 @@ async def _post(provider: str, url: str, body: dict, headers: dict) -> dict:
                 request=r.request,
                 response=r,
             )
+        # Diagnostic: log 4xx response BODY before raising — the body has the
+        # actual error reason (context overflow, malformed schema, etc.).
+        if r.status_code >= 400:
+            log.warning(
+                "%s %d body=%s req_size=%d",
+                provider, r.status_code, r.text[:1000], len(r.request.content or b""),
+            )
         r.raise_for_status()
         return r.json()
 
