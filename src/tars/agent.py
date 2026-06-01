@@ -135,9 +135,16 @@ class Agent:
         # tool round to messages so the LLM sees the results without having
         # had to "remember" to fetch them. Skips for very short or non-
         # questiony inputs (greetings, single-word commands) to save cost.
+        #
+        # IMPORTANT: cron jobs (thread_key startswith "job:") build their own
+        # structured payloads and pass them as user_text. Adding pre-search
+        # results on top can push us past the model's context window — in
+        # the briefing's case from ~138K to over 200K, which then 400s on
+        # both OpenRouter and OpenAI. Skip pre-search/pre-list for jobs.
+        is_job = thread_key.startswith("job:")
         presearch_block: str | None = None
         prelist_block: str | None = None
-        if auto_search and _looks_like_question(user_text):
+        if auto_search and not is_job and _looks_like_question(user_text):
             try:
                 presearch_block = await run_tool(
                     self.db, "search_memory",
@@ -149,7 +156,7 @@ class Agent:
         # "last N notes". Semantic search is the WRONG tool for these (it
         # tries to match "show me my notes" as a topic). list_notes returns
         # the actual recent rows. Cheap (one DB query) — always safe to call.
-        if auto_search and _looks_like_list_notes(user_text):
+        if auto_search and not is_job and _looks_like_list_notes(user_text):
             try:
                 prelist_block = await run_tool(
                     self.db, "list_notes",
