@@ -350,10 +350,11 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
 
     # Direct-save prefixes — bypass the LLM entirely.
     # Matches: "note:", "add note:", "take note:", "new note:", "note this:",
-    # plus Hebrew "הערה:", "רשום:", "הוסף הערה:".
-    # The LLM was hallucinating "Noted. [note:N]" without actually calling
-    # save_note when the message didn't *start* with "note:" — the fast-path
-    # eliminates that whole risk surface.
+    # plus Hebrew "הערה:", "רשום:", "הוסף הערה:". Separator after prefix
+    # word is colon OR whitespace ("add note <body>" works without colon —
+    # user kept hitting this and the LLM was hallucinating "Noted." for it).
+    # The boundary (\b/whitespace before "note") guards against "notes are
+    # stupid" / "notepad" type false positives.
     NOTE_PREFIX_RE = (
         r"(?is)^\s*(?:"
         r"(?:add|take|new)\s+note"
@@ -361,15 +362,17 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         r"|הוסף\s+הערה"
         r"|הערה"
         r"|רשום"
-        r")\s*:\s*(.+)"
+        r")[\s:]+(.+)"
     )
 
     @dp.message(F.text.regexp(NOTE_PREFIX_RE), auth)
     async def _take_note(m: Message) -> None:
         # Direct save_note — no LLM, no cost, no hallucination possible.
-        body = (m.text or "").split(":", 1)[1].strip()
+        import re as _re
+        m_match = _re.match(NOTE_PREFIX_RE, m.text or "")
+        body = (m_match.group(1) if m_match else "").strip()
         if not body:
-            await m.answer("Empty note. Try: note: bought milk")
+            await m.answer("Empty note. Try: add note bought milk")
             return
         result = await tool_save_note(agent.db, {"body": body, "tags": ["telegram"]})
         try:
