@@ -265,11 +265,8 @@ async def call(
         # sometimes wraps provider errors as 200 with empty content.
         if not (msg.get("content") or "").strip() and not msg.get("tool_calls"):
             log.warning(
-                "empty LLM response — provider=%s model=%s usage=%s "
-                "finish_reason=%s raw_choices=%s",
-                provider, model_used, data.get("usage"),
-                (data.get("choices") or [{}])[0].get("finish_reason"),
-                str(data.get("choices"))[:500],
+                "empty LLM response — provider=%s model=%s full_data=%s",
+                provider, model_used, str(data)[:1500],
             )
         return LLMResponse(
             text=msg.get("content") or "",
