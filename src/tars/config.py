@@ -72,6 +72,15 @@ class WeatherConfig(BaseModel):
     location_name: str = "Tel Aviv"
 
 
+class RunningCoachConfig(BaseModel):
+    """Optional. Pulls today's training plan from the user's running-coach
+    Next.js app. Disabled (briefing omits section) if any field is empty."""
+
+    base_url: str = ""        # e.g. https://running-coach.vercel.app
+    auth_token: str = ""      # value of CRON_SECRET on the running-coach side
+    user_id: str = ""         # Supabase auth user id of the owner
+
+
 class Config(BaseModel):
     """Top-level TARS configuration. Strict — extra keys fail."""
 
@@ -86,6 +95,7 @@ class Config(BaseModel):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     tiers: TiersConfig = Field(default_factory=TiersConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    running_coach: RunningCoachConfig = Field(default_factory=RunningCoachConfig)
 
 
 def _default_config_path() -> Path:

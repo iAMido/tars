@@ -50,3 +50,10 @@ api_key = ""
 lat = 32.0853                       # default: Tel Aviv coastline
 lon = 34.7818
 location_name = "Tel Aviv"
+
+[running_coach]
+# TARS will pull today's training plan from this Next.js app via
+# GET /api/cron/tars-today. Leave any field empty to disable.
+base_url = ""                       # e.g. https://running-coach.vercel.app
+auth_token = ""                     # value of CRON_SECRET on the running-coach side
+user_id = ""                        # Supabase auth user id of the owner

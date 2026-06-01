@@ -28,6 +28,7 @@ from tars.integrations.gmail import (
     get_self_email,
 )
 from tars.integrations.quote import fetch_quote_of_the_day
+from tars.integrations.running_coach import fetch_today_training
 from tars.integrations.weather import fetch_today_forecast
 from tars.memory.follow_ups import list_open
 from tars.memory.search import hybrid_search
@@ -286,9 +287,9 @@ PROMPT_TEMPLATE = (
     "nothing worth including, OMIT the header AND body completely.\n"
     "- When you cite a follow-up id, wrap the bracketed token in backticks: "
     "`` `[followup:N]` `` — Telegram's Markdown swallows `[...]` otherwise.\n"
-    "- Possible section headers IN THIS ORDER: *Weather*, *Today*, *Email*, "
-    "*Pending replies*, *Calendar*, *Open follow-ups*, *Suggestions*, "
-    "*Warnings*, *Quote*.\n"
+    "- Possible section headers IN THIS ORDER: *Weather*, *Training*, "
+    "*Today*, *Email*, *Pending replies*, *Calendar*, *Open follow-ups*, "
+    "*Suggestions*, *Warnings*, *Quote*.\n"
     "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
     "Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
@@ -300,19 +301,38 @@ PROMPT_TEMPLATE = (
     "if rain_today_mm > 1. Example output: `Kfar Saba 19–27°C, clear sky`. "
     "No bullets, no extra lines.\n"
     "\n"
-    "*Today* — REQUIRED IF the payload is non-trivial. 1-3 short lines "
-    "synthesizing what the day is actually about. Connect the dots:\n"
-    "  - meeting + unread email from the attendee\n"
-    "  - follow-up due today\n"
-    "  - email subject that references a recent note (recent_notes or "
-    "relevant_notes)\n"
-    "  - recurring theme across notes/emails/meetings (e.g. \"three things "
-    "today all touch your Portugal move\")\n"
-    "When a connection involves a stored note, cite it inline with backticks: "
-    "`` `[note:N]` `` (e.g. \"meeting with Sarah re Q3 budget — you noted last "
-    "week she's pushing for a 15% cut `[note:42]`\"). This is the line the "
-    "user reads first — make it earn its place. If nothing meaningful, skip "
-    "this section.\n"
+    "*Training* — payload.training present. Format:\n"
+    "  Line 1: ``<plan.type> · Week <plan.current_week>/<plan.total_weeks>``\n"
+    "  Line 2: ``Today (<day_of_week>): <today.summary or rest>``\n"
+    "      If today.type exists, write `<type> · <distance>km · <description>` "
+    "in your own concise wording.\n"
+    "      If today is rest day or null, write `Today: rest day`.\n"
+    "  Line 3 (only if non-trivial): ``Week: <rough outline from week_outline>`` "
+    "— e.g. `Sun easy · Mon rest · Tue intervals · ... ` in compact form. "
+    "Skip if outline is empty or all-rest.\n"
+    "  No emoji. No motivational fluff. Just the prescription.\n"
+    "\n"
+    "*Today* — the user reads this FIRST. Make it earn its place. "
+    "Format: 2-4 BULLETS (`- `), each one ONE short sentence. NOT a "
+    "paragraph. Each bullet is a distinct thing the user should know.\n"
+    "Priority ordering (top to bottom):\n"
+    "  1. Anything URGENT today (overdue follow-up, deadline today, "
+    "burning email)\n"
+    "  2. Today's most important event/decision/meeting + any prep "
+    "context (notes, prior emails)\n"
+    "  3. A non-obvious connection (e.g. \"three things today all touch "
+    "your Portugal move\")\n"
+    "  4. One forward-looking item if a near-future event needs prep "
+    "(this week)\n"
+    "STRICT skips:\n"
+    "  - Don't list things already DONE today (closed follow-ups, "
+    "shipped fixes) — they belong in evening_wrapup, not morning *Today*\n"
+    "  - Don't restate Calendar verbatim — *Today* is interpretation, "
+    "not duplication\n"
+    "  - Don't pad. 2 strong bullets > 4 weak ones. If only one thing "
+    "matters, ONE bullet.\n"
+    "Cite notes inline with backticks: `` `[note:N]` ``. Only cite ids "
+    "present in recent_notes or relevant_notes payload below.\n"
     "\n"
     "*Email* — one bullet per overnight unread email starting with `- `:\n"
     "  `- <From shortened to name or org> — <one-line summary of what the "
@@ -425,6 +445,7 @@ async def morning_briefing(agent, db, cfg) -> dict:
     yesterday = await _yesterday_summary(db, today)
     weather = await fetch_today_forecast(cfg)       # None on failure or no key
     quote = await fetch_quote_of_the_day()          # None on failure
+    training = await fetch_today_training(cfg)      # None when no plan or not configured
     warnings = [w for w in (email_err, cal_err) if w]
 
     # Cross-reference: attach by_attendee context onto each calendar event.
@@ -488,6 +509,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
     payload: dict[str, Any] = {"date": today}
     if weather:
         payload["weather"] = weather
+    if training:
+        payload["training"] = training
     if quote:
         payload["quote"] = quote
     if yesterday:
@@ -566,10 +589,11 @@ async def morning_briefing(agent, db, cfg) -> dict:
     log.info(
         "morning_briefing: done date=%s emails=%d pending=%d cal=%d att=%d "
         "followups=%d recent_notes=%d relevant_notes=%d yest=%s wx=%s "
-        "quote=%s sent=%d elapsed=%.2fs cost=$%.6f",
+        "quote=%s train=%s sent=%d elapsed=%.2fs cost=$%.6f",
         today, len(emails), len(pending), len(cal), len(attendee_set),
         len(fus), len(recent_notes), len(relevant_notes), bool(yesterday),
-        bool(weather), bool(quote), sent, elapsed, out.get("cost_usd", 0.0),
+        bool(weather), bool(quote), bool(training),
+        sent, elapsed, out.get("cost_usd", 0.0),
     )
     return {
         "date": today,
