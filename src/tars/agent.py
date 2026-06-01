@@ -136,6 +136,7 @@ class Agent:
         # had to "remember" to fetch them. Skips for very short or non-
         # questiony inputs (greetings, single-word commands) to save cost.
         presearch_block: str | None = None
+        prelist_block: str | None = None
         if auto_search and _looks_like_question(user_text):
             try:
                 presearch_block = await run_tool(
@@ -144,6 +145,18 @@ class Agent:
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("pre-search failed (%s); continuing without", e)
+        # Listing intent — "show me my notes", "what did I note today",
+        # "last N notes". Semantic search is the WRONG tool for these (it
+        # tries to match "show me my notes" as a topic). list_notes returns
+        # the actual recent rows. Cheap (one DB query) — always safe to call.
+        if auto_search and _looks_like_list_notes(user_text):
+            try:
+                prelist_block = await run_tool(
+                    self.db, "list_notes",
+                    json.dumps({"limit": 20}),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("pre-list_notes failed (%s); continuing without", e)
 
         # The frozen prefix MUST sit at index 0. History tails. User input is
         # the final element. Pre-search results (if any) ride INSIDE the user
@@ -151,13 +164,21 @@ class Agent:
         # context — and so verified_note_ids picks up their ids from the same
         # bytes that get sent to the model.
         injected_user_text = user_text
+        blocks: list[str] = []
         if presearch_block:
-            injected_user_text = (
-                f"{user_text}\n\n"
+            blocks.append(
                 f"[system pre-search of your memory for this query — use these "
                 f"results if relevant, ignore if not. cite [note:N] only for ids "
                 f"that appear below.]\n{presearch_block}"
             )
+        if prelist_block:
+            blocks.append(
+                f"[system pre-list of your recent notes — the user asked to "
+                f"list/show notes. Use this directly. cite ids from below only.]"
+                f"\n{prelist_block}"
+            )
+        if blocks:
+            injected_user_text = user_text + "\n\n" + "\n\n".join(blocks)
 
         messages: list[dict] = [{"role": "system", "content": SYSTEM_BLOCK}]
         messages.extend(history)
@@ -322,6 +343,26 @@ _QUESTION_WORDS_RE = re.compile(
     r"מה|מי|איפה|איך|מתי|למה|כמה|האם)\b",
     re.IGNORECASE,
 )
+
+
+_LIST_NOTES_RE = re.compile(
+    r"(?is)\b("
+    r"show\s+(?:me\s+)?(?:my\s+)?(?:recent\s+|last\s+\d+\s+)?notes?"
+    r"|list\s+(?:my\s+)?notes?"
+    r"|what\s+(?:did\s+i|have\s+i)\s+note(?:d)?"
+    r"|my\s+(?:recent\s+|last\s+)?notes?"
+    r"|display\s+(?:my\s+)?notes?"
+    r"|הצג\s+(?:את\s+)?(?:ה)?הערות"
+    r"|רשימת\s+(?:ה)?הערות"
+    r")\b"
+)
+
+
+def _looks_like_list_notes(text: str) -> bool:
+    """Match listing/enumeration phrasings — these should route to list_notes,
+    not search_memory (semantic search for 'show me my notes' returns
+    nothing useful)."""
+    return bool(_LIST_NOTES_RE.search(text or ""))
 
 
 def _looks_like_question(text: str) -> bool:
