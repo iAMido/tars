@@ -137,6 +137,12 @@ async def _cmd_job(name: str) -> int:
         if name == "morning_briefing":
             from tars.scheduler.morning_briefing import morning_briefing
             summary = await morning_briefing(agent, db, cfg)
+        elif name == "midday_checkin":
+            from tars.scheduler.midday_checkin import midday_checkin
+            summary = await midday_checkin(agent, db, cfg)
+        elif name == "evening_wrapup":
+            from tars.scheduler.evening_wrapup import evening_wrapup
+            summary = await evening_wrapup(agent, db, cfg)
         elif name == "email_summary":
             from tars.scheduler.email_summary import email_summary
             summary = await email_summary(agent, db, cfg)
@@ -288,6 +294,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "name",
         choices=[
             "morning_briefing",
+            "midday_checkin",
+            "evening_wrapup",
             "email_summary",
             "calendar_pull",
             "brain_reindex",

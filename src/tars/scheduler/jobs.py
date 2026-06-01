@@ -24,7 +24,9 @@ from tars.scheduler.cooldown_clear import cooldown_clear_job
 from tars.scheduler.cost_rollup_daily import cost_rollup_daily_job
 from tars.scheduler.email_summary import email_summary_job
 from tars.scheduler.entity_dedup import entity_dedup_job
+from tars.scheduler.evening_wrapup import evening_wrapup_job
 from tars.scheduler.followup_due_scan import followup_due_scan_job
+from tars.scheduler.midday_checkin import midday_checkin_job
 from tars.scheduler.lab_notebook_digest import lab_notebook_digest_job
 from tars.scheduler.morning_briefing import morning_briefing_job
 from tars.scheduler.news_sources_refresh import news_sources_refresh_job
@@ -60,6 +62,24 @@ def build_scheduler(agent, db, cfg) -> AsyncIOScheduler:
         morning_briefing_job,
         CronTrigger(hour=5, minute=0, timezone=cfg.timezone),
         id="morning_briefing",
+        replace_existing=True,
+        misfire_grace_time=900,
+    )
+
+    # 13:00 daily — midday check-in. New emails + afternoon calendar + due-soon.
+    sched.add_job(
+        midday_checkin_job,
+        CronTrigger(hour=13, minute=0, timezone=cfg.timezone),
+        id="midday_checkin",
+        replace_existing=True,
+        misfire_grace_time=900,
+    )
+
+    # 18:00 daily — evening wrap-up. What closed today + still-open + tomorrow.
+    sched.add_job(
+        evening_wrapup_job,
+        CronTrigger(hour=18, minute=0, timezone=cfg.timezone),
+        id="evening_wrapup",
         replace_existing=True,
         misfire_grace_time=900,
     )
