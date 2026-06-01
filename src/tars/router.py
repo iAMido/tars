@@ -267,14 +267,6 @@ async def call(
         )
 
         msg = (data.get("choices") or [{}])[0].get("message") or {}
-        # Diagnostic: when content is empty AND no tool calls, log the raw
-        # response so we can see WHY the model returned nothing. OpenRouter
-        # sometimes wraps provider errors as 200 with empty content.
-        if not (msg.get("content") or "").strip() and not msg.get("tool_calls"):
-            log.warning(
-                "empty LLM response — provider=%s model=%s full_data=%s",
-                provider, model_used, str(data)[:1500],
-            )
         return LLMResponse(
             text=msg.get("content") or "",
             tool_calls=msg.get("tool_calls") or [],
