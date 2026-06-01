@@ -535,9 +535,9 @@ async def morning_briefing(agent, db, cfg) -> dict:
                         briefing_date=today,
                     )
                     kb = build_suggestion_keyboard(pending_ids)
-                    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
+                    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
                 else:
-                    await bot.send_message(chat_id, text, parse_mode="Markdown")
+                    await bot.send_message(chat_id, text, parse_mode="Markdown", disable_web_page_preview=True)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("morning_briefing: send_message to %s failed (%s)", chat_id, e)

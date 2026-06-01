@@ -102,7 +102,7 @@ async def competitive_intel_scan(agent, db, cfg) -> dict:
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
-                await bot.send_message(chat_id, text, parse_mode="Markdown")
+                await bot.send_message(chat_id, text, parse_mode="Markdown", disable_web_page_preview=True)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("competitive_intel_scan: send failed (%s)", e)
