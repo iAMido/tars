@@ -62,6 +62,16 @@ class TiersConfig(BaseModel):
     web_research: str = "openai/gpt-5:online"
 
 
+class WeatherConfig(BaseModel):
+    """Optional. If api_key is empty, weather is silently skipped."""
+
+    api_key: str = ""
+    # Default location — Tel Aviv coast. Override per-user in config.toml.
+    lat: float = 32.0853
+    lon: float = 34.7818
+    location_name: str = "Tel Aviv"
+
+
 class Config(BaseModel):
     """Top-level TARS configuration. Strict — extra keys fail."""
 
@@ -75,6 +85,7 @@ class Config(BaseModel):
     paths: PathsConfig
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     tiers: TiersConfig = Field(default_factory=TiersConfig)
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
 
 
 def _default_config_path() -> Path:

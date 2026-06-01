@@ -27,6 +27,8 @@ from tars.integrations.gmail import (
     gather_briefing_intel,
     get_self_email,
 )
+from tars.integrations.quote import fetch_quote_of_the_day
+from tars.integrations.weather import fetch_today_forecast
 from tars.memory.follow_ups import list_open
 from tars.memory.search import hybrid_search
 from tars.tools import _get_embedder
@@ -284,13 +286,19 @@ PROMPT_TEMPLATE = (
     "nothing worth including, OMIT the header AND body completely.\n"
     "- When you cite a follow-up id, wrap the bracketed token in backticks: "
     "`` `[followup:N]` `` — Telegram's Markdown swallows `[...]` otherwise.\n"
-    "- Possible section headers IN THIS ORDER: *Today*, *Email*, "
-    "*Pending replies*, *Calendar*, *Open follow-ups*, *Suggestions*, *Warnings*.\n"
+    "- Possible section headers IN THIS ORDER: *Weather*, *Today*, *Email*, "
+    "*Pending replies*, *Calendar*, *Open follow-ups*, *Suggestions*, "
+    "*Warnings*, *Quote*.\n"
     "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
     "Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
     "- Do NOT repeat anything verbatim from `yesterday_summary` (provided for "
     "context only — so today doesn't sound like a copy of yesterday).\n"
+    "\n"
+    "*Weather* — ONE line. Use payload.weather. Format: "
+    "`{location} {min}–{max}°C, {headline}{rain_note}` where {rain_note} is "
+    "empty unless rain_today_mm > 1, in which case append `, {rain}mm rain`. "
+    "Example: `Tel Aviv 19–27°C, clear sky`. No bullets, no extra lines.\n"
     "\n"
     "*Today* — REQUIRED IF the payload is non-trivial. 1-3 short lines "
     "synthesizing what the day is actually about. Connect the dots:\n"
@@ -362,6 +370,10 @@ PROMPT_TEMPLATE = (
     "\n"
     "*Warnings* — one line per warning, terse.\n"
     "\n"
+    "*Quote* — payload.quote present? Render as: `_\"{text}\"_ — {author}`. "
+    "Italic with underscores. No leading bullet, no commentary. Skip if no "
+    "quote in payload.\n"
+    "\n"
     "NOTES IN THE PAYLOAD — read carefully:\n"
     "  - `recent_notes` = everything the user jotted in the last 36h. Use "
     "this as context for what's on their mind. Don't list them as their "
@@ -411,6 +423,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
     intel, email_err = await _safe_email_intel(now, sorted(attendee_set))
     fus = await _safe_followups(db, now_dt)
     yesterday = await _yesterday_summary(db, today)
+    weather = await fetch_today_forecast(cfg)       # None on failure or no key
+    quote = await fetch_quote_of_the_day()          # None on failure
     warnings = [w for w in (email_err, cal_err) if w]
 
     # Cross-reference: attach by_attendee context onto each calendar event.
@@ -472,6 +486,10 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     # Build payload — drop empty keys so the LLM omits their headers entirely.
     payload: dict[str, Any] = {"date": today}
+    if weather:
+        payload["weather"] = weather
+    if quote:
+        payload["quote"] = quote
     if yesterday:
         payload["yesterday_summary"] = yesterday
     if emails:
@@ -547,11 +565,11 @@ async def morning_briefing(agent, db, cfg) -> dict:
     elapsed = time.time() - t0
     log.info(
         "morning_briefing: done date=%s emails=%d pending=%d cal=%d att=%d "
-        "followups=%d recent_notes=%d relevant_notes=%d yest=%s sent=%d "
-        "elapsed=%.2fs cost=$%.6f",
+        "followups=%d recent_notes=%d relevant_notes=%d yest=%s wx=%s "
+        "quote=%s sent=%d elapsed=%.2fs cost=$%.6f",
         today, len(emails), len(pending), len(cal), len(attendee_set),
         len(fus), len(recent_notes), len(relevant_notes), bool(yesterday),
-        sent, elapsed, out.get("cost_usd", 0.0),
+        bool(weather), bool(quote), sent, elapsed, out.get("cost_usd", 0.0),
     )
     return {
         "date": today,

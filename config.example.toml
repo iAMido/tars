@@ -42,3 +42,11 @@ ingest = "deepseek/deepseek-v3.2"
 # :online enables OpenRouter's auto web-search plugin (~$5 per 1000 searches
 # on top of model tokens). Only /research uses this tier, so cost stays bounded.
 web_research = "openai/gpt-5:online"
+
+[weather]
+# OpenWeatherMap API key — free tier, sign up at https://openweathermap.org/api.
+# Leave api_key = "" to disable; the briefing will silently skip the Weather section.
+api_key = ""
+lat = 32.0853                       # default: Tel Aviv coastline
+lon = 34.7818
+location_name = "Tel Aviv"

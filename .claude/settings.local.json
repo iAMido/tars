@@ -30,7 +30,17 @@
       "mcp__github__list_issues",
       "Bash(uv run *)",
       "Bash(uv sync *)",
-      "Bash(git tag -a v1.0.0 -m 'V1.0.0 — TARS feature-complete personal AI agent *)"
+      "Bash(git tag -a v1.0.0 -m 'V1.0.0 — TARS feature-complete personal AI agent *)",
+      "Bash(xxd /c/Users/reutn/.ssh/config)",
+      "Bash(tail -c +4 /c/Users/reutn/.ssh/config > /c/Users/reutn/.ssh/config.tmp && mv /c/Users/reutn/.ssh/config.tmp /c/Users/reutn/.ssh/config && xxd /c/Users/reutn/.ssh/config | head -1)",
+      "Bash(ssh tars-vps *)",
+      "Bash(git reset *)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['src/tars/tools.py','src/tars/prompt.py']]; print\\('syntax OK'\\)\")",
+      "Bash(python -m pytest tests/unit/test_prompt_byte_stability.py -q)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['src/tars/prompt.py','src/tars/agent.py']]; print\\('syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/tars/agent.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['src/tars/scheduler/morning_briefing.py','src/tars/scheduler/midday_checkin.py','src/tars/scheduler/evening_wrapup.py']]; print\\('syntax OK'\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['src/tars/config.py','src/tars/integrations/weather.py','src/tars/integrations/quote.py','src/tars/scheduler/morning_briefing.py']]; print\\('syntax OK'\\)\")"
     ]
   }
 }
