@@ -127,7 +127,15 @@ class Agent:
         auto_search: bool = True,
     ) -> dict[str, Any]:
         await self._ensure_thread(thread_key)
-        history = await self._load_history(thread_key)
+        # Cron jobs (thread_key startswith "job:") pass enormous structured
+        # prompts (~140K tokens for the morning briefing). Persisting that as
+        # a user turn AND reloading it as history on the next run stacks up
+        # FAST — by the third run we blow past DeepSeek's 163K context window
+        # and get a 400 from OpenRouter. Each job invocation is independent
+        # anyway — yesterday's briefing has nothing useful for today's.
+        # Skip history entirely for jobs.
+        is_job = thread_key.startswith("job:")
+        history = [] if is_job else await self._load_history(thread_key)
 
         # Pre-search every chat turn: the LLM keeps "skipping" search_memory
         # for short factual questions ("what is PARA?") even with explicit
@@ -141,7 +149,7 @@ class Agent:
         # results on top can push us past the model's context window — in
         # the briefing's case from ~138K to over 200K, which then 400s on
         # both OpenRouter and OpenAI. Skip pre-search/pre-list for jobs.
-        is_job = thread_key.startswith("job:")
+        # (is_job computed above.)
         presearch_block: str | None = None
         prelist_block: str | None = None
         if auto_search and not is_job and _looks_like_question(user_text):
@@ -193,7 +201,13 @@ class Agent:
 
         # Persist the ORIGINAL user_text (not the injected one) so the saved
         # history stays clean and the cache anchor stays stable.
-        await self._save_turn(thread_key, "user", user_text)
+        # Persist the user turn — but for cron jobs (huge prompts) save only
+        # a marker, not the full prompt. Saving the 140K-char prompt would
+        # pollute the messages table even though we skip history loading.
+        if is_job:
+            await self._save_turn(thread_key, "user", f"<job prompt {len(user_text)} chars>")
+        else:
+            await self._save_turn(thread_key, "user", user_text)
 
         # Track every note id that a tool surfaced this turn — used by the
         # citation guardrail at the end. Includes save_note returns,
