@@ -36,7 +36,14 @@ HISTORY_LIMIT = 40
 #   read by a tool call this turn, strip the citation and prepend a warning.
 #   Citations from search_memory / get_note / save_note results are trusted.
 _NOTE_CITE_RE = re.compile(r"\[note:(\d+)\]")
-_NOTE_ID_IN_TOOL_RESULT_RE = re.compile(r'"(?:note_id|doc_id|id)"\s*:\s*(\d+)')
+# Match ANY *note_id-ending key (note_id, source_note_id, resolving_note_id,
+# closes_note_id, ...) plus the generic doc_id / id keys. The evening wrap-up
+# joins follow-ups against their source + resolving notes and surfaces both
+# id fields — the old regex only caught "note_id" alone and silently dropped
+# legitimate citations.
+_NOTE_ID_IN_TOOL_RESULT_RE = re.compile(
+    r'"(?:[a-z_]*note_id|doc_id|id)"\s*:\s*(\d+)'
+)
 # Interactive chat. Legitimate longest flows:
 #   open_reminder:  save_note -> get_current_time -> open_followup -> final = 4
 #   close_reminder: search_memory -> list_followups -> save_note ->
