@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
+from tars.bot.send import safe_send
 from tars.integrations.gcal import fetch_upcoming
 from tars.memory.follow_ups import list_open
 
@@ -228,7 +229,7 @@ async def evening_wrapup(agent, db, cfg) -> dict:
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
-                await bot.send_message(chat_id, text, parse_mode="Markdown", disable_web_page_preview=True)
+                await safe_send(bot, chat_id, text)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("evening: send_message to %s failed (%s)", chat_id, e)
