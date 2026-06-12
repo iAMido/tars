@@ -94,6 +94,14 @@ SYSTEM_BLOCK = (
     "- Closing reminders: when the user says they did X, "
     "(1) save_note about the resolution, (2) list_followups to find the matching followup_id, "
     "(3) close_followup with both ids.\n"
+    "- promote_note: when user asks to turn a note into a project file "
+    "(\"make a project file from note 45\", \"promote this to Areas\"). "
+    "Creates the PARA file with a Source: [[note-NNNNN]] backlink — does "
+    "NOT delete the original.\n"
+    "- update_vault_file: when user asks to add to / edit / mark done in "
+    "an existing PARA file (\"add a bullet to caltrack/issues.md\", "
+    "\"replace the Plan section\"). Restricted to PARA folders (00_Inbox/, "
+    "01_Projects/, etc.) — never touch _TARS/.\n"
     "- web_research: only on the /research command.\n"
     "\n"
     "Never invent dates, citations, or follow-up closures."
@@ -218,6 +226,39 @@ TOOLS: list[dict] = [
                 "properties": {
                     "timezone": {"type": "string", "description": "IANA timezone name. Defaults to user's configured tz."},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "promote_note",
+            "description": "Create a PARA file that references an existing TARS note (DOES NOT MOVE/DELETE the original — leaves linkage intact). Use when the user says 'turn note N into a project', 'promote this to Areas', 'make a Caltrack file from note 45'. Writes <vault>/<dest_folder>/note-NNNNN-<slug>.md with a Source: [[note-NNNNN]] backlink. dest_folder must start with a PARA folder name (00_Inbox/, 01_Projects/, 02_Areas/, 03_Resources/, 04_Archive/).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer", "description": "id of the TARS note to promote"},
+                    "dest_folder": {"type": "string", "description": "vault-relative path, e.g. '01_Projects/Work' or '01_Projects/Caltrack'"},
+                    "title": {"type": "string", "description": "optional title override (used for filename slug + h1). Defaults to first line of body."},
+                },
+                "required": ["note_id", "dest_folder"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_vault_file",
+            "description": "Edit a markdown file in the vault's PARA folders. Use for: appending bullets, marking checklist items done, prepending status updates, rewriting a section. Restricted to PARA folders only (not _TARS/, not _Templates/). The file will sync to all your devices via Syncthing+Obsidian Sync.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "vault-relative .md path, e.g. '01_Projects/Caltrack/issues.md'"},
+                    "mode": {"type": "string", "enum": ["append", "prepend", "overwrite", "replace_section"], "description": "append = add at end; prepend = add at top (after frontmatter); overwrite = replace entire body (destructive); replace_section = replace text under a ## header"},
+                    "content": {"type": "string", "description": "the text to write/append/prepend"},
+                    "section": {"type": "string", "description": "required for mode=replace_section. Matched against `## <section>` or `### <section>` (case-insensitive)."},
+                },
+                "required": ["path", "mode", "content"],
             },
         },
     },

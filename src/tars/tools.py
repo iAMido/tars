@@ -284,6 +284,279 @@ async def web_research(db, args: dict[str, Any]) -> str:
     return json.dumps({"status": "not_yet_implemented", "note": "web_research lands in Phase 6+"})
 
 
+# ---------------------------------------------------------------------------
+# Vault tools — promote_note + update_vault_file
+# ---------------------------------------------------------------------------
+#
+# Both tools restrict writes to PARA folders (00_Inbox / 01_Projects /
+# 02_Areas / 03_Resources / 04_Archive). _TARS/ is OFF LIMITS — that's the
+# TARS-managed area and writes there race with vault_sweep.
+#
+# vault_sweep ingests new files within 10 min, so anything written here will
+# show up as a new note (Path B in the data model) with auto-tagging based
+# on its PARA location.
+
+import os as _os
+import re as _re
+import tempfile as _tempfile
+from pathlib import Path as _Path
+
+_PARA_FOLDERS = {"00_Inbox", "01_Projects", "02_Areas", "03_Resources", "04_Archive"}
+
+
+def _slugify(s: str, maxlen: int = 40) -> str:
+    """Make a filesystem-friendly slug. ASCII letters/digits + dashes."""
+    s = (s or "").strip().lower()
+    # Replace non-alphanum with dashes, collapse repeats.
+    s = _re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s[:maxlen] or "untitled"
+
+
+def _resolve_vault_path(cfg, rel: str) -> tuple[_Path | None, str | None]:
+    """Resolve a vault-relative path. Returns (abs_path, error_or_None).
+
+    Hard guards: absolute paths rejected, `..` traversal rejected, result
+    must live inside cfg.paths.vault, and the FIRST path segment must be
+    one of the PARA folders (not `_TARS`, not `_Templates`, not a dotfile).
+    """
+    if not rel or not isinstance(rel, str):
+        return None, "path is required"
+    rel = rel.strip().replace("\\", "/").lstrip("/")
+    if ".." in _Path(rel).parts:
+        return None, "path traversal forbidden"
+    vault_root = _Path(cfg.paths.vault).resolve()
+    target = (vault_root / rel).resolve()
+    try:
+        target.relative_to(vault_root)
+    except ValueError:
+        return None, "path must be inside the vault"
+    parts = _Path(rel).parts
+    if not parts:
+        return None, "empty path"
+    top = parts[0]
+    if top not in _PARA_FOLDERS:
+        return None, (
+            f"top-level folder {top!r} not writable. Use one of: "
+            f"{sorted(_PARA_FOLDERS)}"
+        )
+    return target, None
+
+
+def _atomic_write_text(path: _Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = _tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp, path)
+    except Exception:
+        try:
+            _os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+async def promote_note(db, args: dict[str, Any]) -> str:
+    """Create a PARA file that references an existing TARS note.
+
+    Use for: "turn note 45 into a project file under 01_Projects/Caltrack",
+    "promote my brain-dump into 02_Areas/Health".
+
+    Does NOT move or delete the original — that would break follow-up
+    linkage. Creates a NEW .md file in the target folder with the body
+    plus a `Source: [[note-NNNNN]]` backlink. vault_sweep auto-ingests
+    the new file with PARA tags within 10 min.
+
+    Args:
+      note_id:      integer id of the TARS note to promote
+      dest_folder:  vault-relative, must start with a PARA folder name
+                    (e.g. "01_Projects/Caltrack")
+      title:        optional override for filename slug. Defaults to first
+                    line of the note body.
+    """
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return json.dumps({"error": "vault unavailable: cfg not bound"})
+    try:
+        nid = int(args.get("note_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return json.dumps({"error": "promote_note requires integer note_id"})
+    dest_folder = (args.get("dest_folder") or "").strip()
+    if not dest_folder:
+        return json.dumps({"error": "dest_folder required (e.g. '01_Projects/Work')"})
+    title_arg = (args.get("title") or "").strip()
+
+    row = await db.fetch_one(
+        "SELECT id, body, tags FROM notes WHERE id = ? AND status != 'deleted'",
+        (nid,),
+    )
+    if row is None:
+        return json.dumps({"error": f"note #{nid} not found"})
+    body = (row["body"] or "").strip()
+
+    # Filename: note-NNNNN-<slug>.md. Slug from explicit title or first
+    # non-empty line.
+    raw_title = title_arg or body.split("\n", 1)[0]
+    slug = _slugify(raw_title)
+    filename = f"note-{nid:05d}-{slug}.md"
+
+    rel = f"{dest_folder.rstrip('/')}/{filename}"
+    abs_path, err = _resolve_vault_path(cfg, rel)
+    if err:
+        return json.dumps({"error": err})
+    if abs_path.exists():
+        return json.dumps({
+            "error": f"file already exists: {rel}. Pick a different title "
+                     f"or update the existing file with update_vault_file."
+        })
+
+    content = (
+        f"# {raw_title}\n\n"
+        f"Source: [[note-{nid:05d}]] (TARS capture)\n\n"
+        f"---\n\n"
+        f"{body}\n"
+    )
+    try:
+        _atomic_write_text(abs_path, content)
+    except Exception as e:  # noqa: BLE001
+        log.warning("promote_note write failed: %s", e)
+        return json.dumps({"error": f"write failed: {e}"})
+    log.info("promote_note: note=%d -> %s", nid, rel)
+    return json.dumps({
+        "ok": True,
+        "note_id": nid,
+        "path": rel,
+        "byte_size": len(content.encode("utf-8")),
+    })
+
+
+async def update_vault_file(db, args: dict[str, Any]) -> str:
+    """Edit a markdown file inside the vault's PARA folders.
+
+    Use for: "add a bullet to projects/Caltrack/issues.md", "mark this
+    item done in my plan file", "replace the Plan section with X".
+
+    Restricted to PARA folders (00_Inbox / 01_Projects / 02_Areas /
+    03_Resources / 04_Archive). Can NOT touch _TARS/ — that's TARS-managed
+    and edits race with vault_sweep.
+
+    Args:
+      path:     vault-relative path (e.g. "01_Projects/Caltrack/issues.md").
+                Must end in .md.
+      mode:     one of: append | prepend | overwrite | replace_section
+                  append          — adds <content> at end with a leading blank line
+                  prepend         — adds <content> at top (after any frontmatter)
+                  overwrite       — replaces entire body (DESTRUCTIVE — use sparingly)
+                  replace_section — replaces text under a markdown header
+                                    (must specify section)
+      content:  the text to write
+      section:  required for replace_section. Match against `## <section>`
+                or `### <section>` (case-insensitive). Replaces everything
+                from that header up to the next same-or-higher level header.
+    """
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return json.dumps({"error": "vault unavailable: cfg not bound"})
+    path = (args.get("path") or "").strip()
+    mode = (args.get("mode") or "").strip().lower()
+    content = args.get("content") or ""
+    if not isinstance(content, str):
+        return json.dumps({"error": "content must be a string"})
+    if mode not in ("append", "prepend", "overwrite", "replace_section"):
+        return json.dumps({
+            "error": "mode must be one of: append, prepend, overwrite, replace_section"
+        })
+    if not path.endswith(".md"):
+        return json.dumps({"error": "path must end in .md"})
+    abs_path, err = _resolve_vault_path(cfg, path)
+    if err:
+        return json.dumps({"error": err})
+
+    # Read existing (empty string if file doesn't yet exist — overwrite + create OK).
+    existing = ""
+    file_exists = abs_path.exists()
+    if file_exists:
+        try:
+            existing = abs_path.read_text(encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": f"read failed: {e}"})
+
+    new_content: str
+
+    if mode == "append":
+        sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+        new_content = existing + sep + content.rstrip() + "\n"
+    elif mode == "prepend":
+        # Preserve YAML frontmatter at the top if present.
+        if existing.startswith("---\n"):
+            end = existing.find("\n---\n", 4)
+            if end != -1:
+                head = existing[: end + 5]
+                body = existing[end + 5 :]
+                new_content = head + content.rstrip() + "\n\n" + body
+            else:
+                new_content = content.rstrip() + "\n\n" + existing
+        else:
+            new_content = content.rstrip() + "\n\n" + existing
+    elif mode == "overwrite":
+        new_content = content if content.endswith("\n") else content + "\n"
+    else:  # replace_section
+        section = (args.get("section") or "").strip()
+        if not section:
+            return json.dumps({"error": "section required for replace_section"})
+        if not file_exists:
+            return json.dumps({
+                "error": f"can't replace_section on a file that doesn't exist: {path}"
+            })
+        # Find a markdown header matching <section>. Accept ##, ###, ####.
+        header_re = _re.compile(
+            rf"(?im)^(#{{2,4}})\s+{_re.escape(section)}\s*$"
+        )
+        m = header_re.search(existing)
+        if not m:
+            return json.dumps({
+                "error": f"section header '## {section}' not found in {path}"
+            })
+        header_level = len(m.group(1))
+        after = existing[m.end():]
+        # Find next header at same or higher level (fewer or equal #'s).
+        next_pat = _re.compile(
+            r"(?im)^(#{1," + str(header_level) + r"})\s+\S"
+        )
+        nxt = next_pat.search(after)
+        if nxt:
+            tail = after[nxt.start():]
+        else:
+            tail = ""
+        head = existing[: m.end()]
+        body = content.strip() + "\n\n"
+        new_content = head + "\n\n" + body + tail
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+
+    try:
+        _atomic_write_text(abs_path, new_content)
+    except Exception as e:  # noqa: BLE001
+        log.warning("update_vault_file write failed: %s", e)
+        return json.dumps({"error": f"write failed: {e}"})
+    log.info(
+        "update_vault_file: mode=%s path=%s before=%d after=%d",
+        mode, path, len(existing), len(new_content),
+    )
+    return json.dumps({
+        "ok": True,
+        "path": path,
+        "mode": mode,
+        "created": not file_exists,
+        "byte_size": len(new_content.encode("utf-8")),
+    })
+
+
 TOOL_REGISTRY = {
     "save_note": save_note,
     "get_note": get_note,
@@ -294,6 +567,8 @@ TOOL_REGISTRY = {
     "list_followups": list_followups,
     "get_current_time": get_current_time,
     "web_research": web_research,
+    "promote_note": promote_note,
+    "update_vault_file": update_vault_file,
 }
 
 
