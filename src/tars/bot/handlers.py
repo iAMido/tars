@@ -332,6 +332,7 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             "*Writing (fast-path, no LLM)*\n"
             "`note: <body>` — instant save (also: `add note`, `הערה:`, etc.)\n"
             "/promote <note\\_id> <folder> — file a note into PARA\n"
+            "/delete <note\\_id> — soft-delete a TARS note\n"
             "/done <followup\\_id> — close a follow-up\n"
             "\n"
             "*Manual triggers*\n"
@@ -452,6 +453,35 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             "\n".join(lines), parse_mode="Markdown",
             reply_markup=kb, disable_web_page_preview=True,
         )
+
+    @dp.message(Command("delete"), auth)
+    async def _delete(m: Message) -> None:
+        """`/delete <note_id>` — soft-delete a TARS note (DB + vault file)."""
+        from tars.tools import delete_note as _delete_note
+        raw = (m.text or "").removeprefix("/delete").strip()
+        if not raw.isdigit():
+            await m.answer(
+                "Usage: `/delete <note_id>`\nExample: `/delete 113`",
+                parse_mode="Markdown",
+            )
+            return
+        nid = int(raw)
+        out = await _delete_note(agent.db, {"note_id": nid})
+        payload = json.loads(out)
+        if payload.get("ok"):
+            extra = (
+                " (file removed)" if payload.get("file_removed")
+                else " (DB only — no vault file)"
+            )
+            if payload.get("already_deleted"):
+                await m.answer(f"`[note:{nid}]` was already deleted.", parse_mode="Markdown")
+            else:
+                await m.answer(
+                    f"🗑 Deleted `[note:{nid}]`{extra}",
+                    parse_mode="Markdown",
+                )
+        else:
+            await m.answer(f"Delete failed: {payload.get('error','unknown')}")
 
     @dp.message(Command("promote"), auth)
     async def _promote(m: Message) -> None:
