@@ -317,6 +317,22 @@ def build_followup_nudge_keyboard(fu_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
+def build_followups_briefing_rows(fu_ids: Sequence[int]) -> list[list[InlineKeyboardButton]]:
+    """One row per follow-up id with ✅ Done / ⏰ +1h / ⏰ Tomorrow.
+    Custom is omitted — briefings already have a lot going on; user can
+    snooze custom from the per-due ping if they need it.
+    Returns rows (not a full keyboard) so it can be composed with other
+    keyboards in the same message."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for fu_id in fu_ids:
+        rows.append([
+            InlineKeyboardButton(text=f"✅ #{fu_id}",   callback_data=f"fu:d:{fu_id}"),
+            InlineKeyboardButton(text="⏰ +1h",          callback_data=f"fu:s1:{fu_id}"),
+            InlineKeyboardButton(text="⏰ Tomorrow",     callback_data=f"fu:s9:{fu_id}"),
+        ])
+    return rows
+
+
 async def _snooze_followup(db, fu_id: int, new_due_ts: int) -> None:
     """Move due_at forward. last_nudged_at stays where it is so the row
     becomes eligible for re-nudge once new_due_ts passes (because then

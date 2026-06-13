@@ -584,24 +584,41 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     # Send to each allowed chat. Open a fresh Bot session so this is independent
     # of the long-polling bot lifecycle.
-    from tars.bot.actions import build_suggestion_keyboard, create_pending
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from tars.bot.actions import (
+        build_followups_briefing_rows,
+        build_suggestion_keyboard,
+        create_pending,
+    )
     from tars.bot.send import safe_send
+
+    # Follow-up ids the briefing surfaced — used for per-followup action
+    # button rows. Cap to 5 so the keyboard doesn't explode.
+    followup_ids_in_briefing = [int(f["id"]) for f in fus[:5]]
 
     bot = Bot(token=cfg.telegram.bot_token)
     sent = 0
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
+                # Compose keyboard rows: follow-up rows first (most
+                # actionable), then suggestion rows.
+                rows: list[list[InlineKeyboardButton]] = []
+                if followup_ids_in_briefing:
+                    rows.extend(build_followups_briefing_rows(
+                        followup_ids_in_briefing
+                    ))
                 if suggestion_texts:
                     pending_ids = await create_pending(
                         db, chat_id=chat_id,
                         suggestions=[{"text": s} for s in suggestion_texts],
                         briefing_date=today,
                     )
-                    kb = build_suggestion_keyboard(pending_ids)
-                    await safe_send(bot, chat_id, text, reply_markup=kb)
-                else:
-                    await safe_send(bot, chat_id, text)
+                    # build_suggestion_keyboard already builds rows internally.
+                    sk = build_suggestion_keyboard(pending_ids)
+                    rows.extend(sk.inline_keyboard)
+                kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+                await safe_send(bot, chat_id, text, reply_markup=kb)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("morning_briefing: send_message to %s failed (%s)", chat_id, e)

@@ -224,12 +224,23 @@ async def evening_wrapup(agent, db, cfg) -> dict:
     text = (out.get("text") or "").strip() or "(evening wrap-up empty)"
     text = re.sub(r"\*\*(\S[^*\n]*?\S)\*\*", r"*\1*", text)
 
+    # Per-followup action buttons for items in *Still open*.
+    from aiogram.types import InlineKeyboardMarkup
+    from tars.bot.actions import build_followups_briefing_rows
+
+    followup_ids = [int(f["id"]) for f in still_open[:5]]
+    kb = None
+    if followup_ids:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=build_followups_briefing_rows(followup_ids)
+        )
+
     bot = Bot(token=cfg.telegram.bot_token)
     sent = 0
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
-                await safe_send(bot, chat_id, text)
+                await safe_send(bot, chat_id, text, reply_markup=kb)
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("evening: send_message to %s failed (%s)", chat_id, e)
