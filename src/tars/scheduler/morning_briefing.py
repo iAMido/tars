@@ -455,12 +455,17 @@ async def morning_briefing(agent, db, cfg) -> dict:
     quote = await fetch_quote_of_the_day()          # None on failure
     training = await fetch_today_training(cfg)      # None when no plan or not configured
 
-    # Open todos scanned from PARA files. Capped tight to keep payload sane.
+    # Open todos — work-focused only in the morning. User explicitly wants
+    # 01_Projects/Work/work_to_dos.md as the source for the work day.
     open_todos: list[dict] = []
     try:
         from tars.tools import list_open_todos
         import json as _json_inner
-        raw = await list_open_todos(db, {"max_per_file": 5, "max_total": 12})
+        raw = await list_open_todos(db, {
+            "paths": ["01_Projects/Work/work_to_dos.md"],
+            "max_per_file": 8,
+            "max_total": 8,
+        })
         parsed = _json_inner.loads(raw)
         if parsed.get("total_open"):
             open_todos = parsed.get("files") or []

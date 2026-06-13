@@ -283,13 +283,18 @@ async def list_open_todos(db, args: dict[str, Any]) -> str:
     \"what's on my todo list?\", \"open todos?\", \"what work is pending?\".
 
     Args:
-      folder:        optional vault-relative folder filter (e.g. '01_Projects/Work')
+      paths:         optional list of EXPLICIT vault-relative .md paths to
+                     scan (e.g. ['01_Projects/Work/work_to_dos.md']). When
+                     present, only these files are read. Highest priority.
+      folder:        optional vault-relative folder filter (e.g. '01_Projects/Work').
+                     Ignored if `paths` is given.
       max_per_file:  per-file cap on items returned (default 10)
       max_total:     overall cap (default 50)
     """
     cfg = getattr(db, "_cfg", None)
     if cfg is None:
         return json.dumps({"error": "vault unavailable: cfg not bound"})
+    paths_arg = args.get("paths") or None
     folder_filter = (args.get("folder") or "").strip().replace("\\", "/")
     try:
         max_per = max(1, min(int(args.get("max_per_file") or 10), 50))
@@ -300,8 +305,20 @@ async def list_open_todos(db, args: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         max_total = 50
 
-    files = _vault_para_md_files(cfg)
     vault_root = _Path(cfg.paths.vault).resolve()
+
+    # File source: explicit paths beat folder filter beats full vault walk.
+    files: list[_Path] = []
+    if isinstance(paths_arg, list) and paths_arg:
+        for raw in paths_arg:
+            if not isinstance(raw, str):
+                continue
+            abs_path, err = _resolve_vault_path(cfg, raw)
+            if err or not abs_path or not abs_path.exists():
+                continue
+            files.append(abs_path)
+    else:
+        files = _vault_para_md_files(cfg)
 
     results: list[dict] = []
     total = 0
@@ -310,7 +327,7 @@ async def list_open_todos(db, args: dict[str, Any]) -> str:
             rel = str(p.resolve().relative_to(vault_root)).replace("\\", "/")
         except ValueError:
             continue
-        if folder_filter and not rel.startswith(folder_filter):
+        if not paths_arg and folder_filter and not rel.startswith(folder_filter):
             continue
         try:
             content = p.read_text(encoding="utf-8", errors="replace")

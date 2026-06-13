@@ -33,6 +33,8 @@ from tars.bot.actions import (
     handle_custom_remind_reply,
     handle_followup_nudge_callback,
     handle_followup_snooze_reply,
+    handle_midday_todo_callback,
+    handle_midday_todo_eta_reply,
 )
 from tars.config import Config
 from tars.tools import save_note as tool_save_note
@@ -401,6 +403,13 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         except Exception as e:  # noqa: BLE001
             log.exception("followup-snooze reply handler failed (%s); falling through", e)
 
+        # And a reply to a midday todo "ETA?" prompt.
+        try:
+            if await handle_midday_todo_eta_reply(m, agent, cfg):
+                return
+        except Exception as e:  # noqa: BLE001
+            log.exception("midday-todo eta reply handler failed (%s); falling through", e)
+
         thread_key = f"tg:{m.chat.id}"
         try:
             out = await _with_typing(
@@ -442,6 +451,16 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             await cq.answer("not authorized")
             return
         await handle_followup_nudge_callback(cq, bot, agent, cfg)
+
+    # Midday review-todo callbacks (⏰ ETA / 📌 Followup / ✖ Skip).
+    @dp.callback_query(F.data.startswith("mt:"))
+    async def _midday_todo_cb(cq: CallbackQuery) -> None:
+        if cq.from_user is None or cq.from_user.id not in {
+            uid for uid in cfg.telegram.allowed_chat_ids
+        }:
+            await cq.answer("not authorized")
+            return
+        await handle_midday_todo_callback(cq, bot, agent, cfg)
 
     return dp, bot
 

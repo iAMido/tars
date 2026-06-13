@@ -541,6 +541,214 @@ async def handle_followup_snooze_reply(message, agent, cfg) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Midday "review todos" — per-item action buttons
+# ---------------------------------------------------------------------------
+#
+# Each item from 01_Projects/general_to_dos.md gets a pending_actions row
+# (kind='midday_todo') so the per-item callback can fit in Telegram's
+# 64-byte limit (`mt:<verb>:<pending_id>`).
+#
+# Verbs:
+#   eta  — ForceReply "When?" → save_note + open_followup with due
+#   fu   — save_note + open_followup (no due — just a tracking item)
+#   skip — mark consumed, no action
+
+
+def build_midday_todo_rows(pending_ids: Sequence[int]) -> list[list[InlineKeyboardButton]]:
+    """One row per todo item: ⏰ ETA / 📌 Followup / ✖ Skip."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for pid in pending_ids:
+        rows.append([
+            InlineKeyboardButton(text="⏰ ETA",      callback_data=f"mt:eta:{pid}"),
+            InlineKeyboardButton(text="📌 Followup", callback_data=f"mt:fu:{pid}"),
+            InlineKeyboardButton(text="✖ Skip",     callback_data=f"mt:skip:{pid}"),
+        ])
+    return rows
+
+
+async def create_midday_todo_pendings(
+    db, chat_id: int, items: list[str], source_path: str,
+) -> list[int]:
+    """Insert one pending_actions row per todo item. Returns the ids in
+    input order so build_midday_todo_rows can attach matching buttons."""
+    ids: list[int] = []
+    now = int(time.time())
+    extra_json = json.dumps({"path": source_path})
+    for item in items:
+        cur = await db.execute(
+            "INSERT INTO pending_actions("
+            " chat_id, kind, text, extra, created_at"
+            ") VALUES (?, 'midday_todo', ?, ?, ?)",
+            (int(chat_id), item, extra_json, now),
+        )
+        ids.append(int(cur.lastrowid or 0))
+    return ids
+
+
+async def handle_midday_todo_callback(callback, bot: Bot, agent, cfg) -> None:
+    """Route mt:<verb>:<pending_id> from per-todo buttons in midday."""
+    data = (callback.data or "").strip()
+    try:
+        _, verb, pid_str = data.split(":", 2)
+        sid = int(pid_str)
+    except (ValueError, IndexError):
+        await callback.answer("bad data")
+        return
+
+    row = await agent.db.fetch_one(
+        "SELECT id, chat_id, text, extra, consumed_at FROM pending_actions WHERE id = ?",
+        (sid,),
+    )
+    if row is None:
+        await callback.answer("already gone")
+        return
+    if row["consumed_at"] is not None:
+        await callback.answer("already handled")
+        await _replace_row_with_status(callback, bot, sid, "already handled")
+        return
+
+    item_text = row["text"]
+    tz = ZoneInfo(cfg.timezone)
+    status_text = ""
+    result_payload: dict = {}
+
+    try:
+        if verb == "skip":
+            status_text = "✖ skipped today"
+
+        elif verb == "fu":
+            # Untimed follow-up — track without a due date.
+            r = json.loads(await tool_save_note(agent.db, {
+                "body": f"Todo: {item_text}",
+                "tags": ["source/midday-review", "todo"],
+            }))
+            note_id = int(r["note_id"])
+            fu_id = await open_followup(
+                agent.db, note_id=note_id, due_at_iso=None,
+            )
+            status_text = f"📌 followup [followup:{fu_id}]"
+            result_payload = {"note_id": note_id, "followup_id": fu_id}
+
+        elif verb == "eta":
+            # ForceReply — user replies with a time string.
+            prompt = (
+                f"⏰ ETA for:\n_{item_text[:200]}_\n\n"
+                f"Reply with when — e.g. `tomorrow 3pm`, `friday`, "
+                f"`in 2 hours`, `2026-06-20 14:00`."
+            )
+            sent = await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=prompt,
+                parse_mode="Markdown",
+                reply_markup=ForceReply(
+                    input_field_placeholder="e.g. tomorrow 3pm", selective=True,
+                ),
+            )
+            await agent.db.execute(
+                "UPDATE pending_actions SET awaiting_kind = ?, "
+                " prompt_message_id = ? WHERE id = ?",
+                ("midday_todo_eta", sent.message_id, sid),
+            )
+            await callback.answer("Reply with the time")
+            await _replace_row_with_status(callback, bot, sid, "⌛ awaiting time…")
+            return
+
+        else:
+            status_text = f"unknown verb {verb!r}"
+
+    except Exception as e:  # noqa: BLE001
+        log.exception("midday_todo %s for pending=%d failed", verb, sid)
+        status_text = f"error: {type(e).__name__}"
+
+    await agent.db.execute(
+        "UPDATE pending_actions SET consumed_at = ?, consumed_action = ?, "
+        " consumed_result = ? WHERE id = ?",
+        (int(time.time()), verb, json.dumps(result_payload), sid),
+    )
+    await _replace_row_with_status(callback, bot, sid, status_text)
+    await callback.answer(status_text)
+
+
+async def handle_midday_todo_eta_reply(message, agent, cfg) -> bool:
+    """If the user replies to a midday todo ETA ForceReply prompt, parse
+    the time deterministically and create note + follow-up.
+
+    Returns True if we handled the message."""
+    if message.reply_to_message is None:
+        return False
+    prompt_msg_id = message.reply_to_message.message_id
+    row = await agent.db.fetch_one(
+        "SELECT id, text, extra FROM pending_actions "
+        "WHERE awaiting_kind = 'midday_todo_eta' AND prompt_message_id = ? "
+        "  AND consumed_at IS NULL",
+        (prompt_msg_id,),
+    )
+    if row is None:
+        return False
+
+    sid = int(row["id"])
+    item_text = row["text"]
+    user_time = (message.text or "").strip()
+
+    import dateparser
+    tz = ZoneInfo(cfg.timezone)
+    dt = dateparser.parse(
+        user_time,
+        settings={
+            "TIMEZONE": cfg.timezone,
+            "TO_TIMEZONE": cfg.timezone,
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    if dt is None:
+        await message.reply(
+            f"Couldn't parse `{user_time}`. Try `tomorrow 3pm`, `in 2 hours`, "
+            f"`friday 9am`, or `2026-06-20 14:00`.",
+            parse_mode="Markdown",
+        )
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    now_dt = datetime.now(tz)
+    if (now_dt - dt).total_seconds() > 300:
+        await message.reply(
+            f"`{user_time}` → {dt.strftime('%a %Y-%m-%d %H:%M')} is in the past. "
+            f"Reply with a future time.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    r = json.loads(await tool_save_note(agent.db, {
+        "body": f"Todo: {item_text}",
+        "tags": ["source/midday-review", "todo"],
+    }))
+    note_id = int(r["note_id"])
+    fu_id = await open_followup(
+        agent.db, note_id=note_id, due_at_iso=dt.isoformat(timespec="seconds"),
+    )
+
+    await agent.db.execute(
+        "UPDATE pending_actions SET consumed_at = ?, consumed_action = 'eta', "
+        " consumed_result = ? WHERE id = ?",
+        (
+            int(time.time()),
+            json.dumps({
+                "note_id": note_id, "followup_id": fu_id,
+                "user_time": user_time, "resolved_iso": dt.isoformat(),
+            }),
+            sid,
+        ),
+    )
+    await message.reply(
+        f"⏰ ETA set {dt.strftime('%a %Y-%m-%d %H:%M')} for: _{item_text[:80]}_\n"
+        f"[note:{note_id}] [followup:{fu_id}]",
+        parse_mode="Markdown",
+    )
+    return True
+
+
 async def _replace_row_with_status(callback, bot: Bot, sid: int, status: str) -> None:
     """Replace the button row for the given suggestion id with a single
     status button so the user sees what happened without losing context."""

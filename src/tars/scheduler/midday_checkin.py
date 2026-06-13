@@ -55,6 +55,13 @@ PROMPT_TEMPLATE = (
     "*Open* — follow-ups due today or tomorrow. "
     "`` - <body> (due_human) `[followup:N]` ``. Skip if zero.\n"
     "\n"
+    "*Review todos* — your general todo list. Use payload.review_todos "
+    "(list of item strings from 01_Projects/general_to_dos.md). Render "
+    "as a NUMBERED list (\"1.\", \"2.\", ...) so the per-item buttons "
+    "attached to the message correspond to numbered items. Format each "
+    "as `N. <item>`. Skip the entire section if payload.review_todos is "
+    "absent or empty. Do not editorialize — just list them.\n"
+    "\n"
     "Payload:\n{payload}\n"
     "\n"
     "Check-in:"
@@ -161,6 +168,25 @@ async def midday_checkin(agent, db, cfg) -> dict:
                 "due_human": _human_due(f["due_at"], now_dt),
             })
 
+    # Review todos — afternoon is for the user's general todo list. Pull from
+    # 01_Projects/general_to_dos.md only. Each item gets per-todo action
+    # buttons attached to the message (built below in the send block).
+    review_todos: list[dict] = []
+    try:
+        from tars.tools import list_open_todos
+        raw = await list_open_todos(db, {
+            "paths": ["01_Projects/general_to_dos.md"],
+            "max_per_file": 6,
+            "max_total": 6,
+        })
+        parsed = json.loads(raw)
+        if parsed.get("total_open"):
+            files = parsed.get("files") or []
+            if files:
+                review_todos = files[0].get("items") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("midday: review_todos scan failed (%s)", e)
+
     payload: dict[str, Any] = {"date": today, "now": now_dt.strftime("%H:%M")}
     if new["emails"]:
         payload["new_emails"] = new["emails"]
@@ -170,6 +196,8 @@ async def midday_checkin(agent, db, cfg) -> dict:
         payload["this_afternoon"] = afternoon
     if opens:
         payload["open_followups_soon"] = opens
+    if review_todos:
+        payload["review_todos"] = review_todos
 
     # Always include the "status" guidance even when empty so the LLM
     # always renders that section.
@@ -183,22 +211,33 @@ async def midday_checkin(agent, db, cfg) -> dict:
     text = (out.get("text") or "").strip() or "(midday check-in empty)"
     text = re.sub(r"\*\*(\S[^*\n]*?\S)\*\*", r"*\1*", text)
 
-    # Send to Telegram with follow-up action buttons if any are surfaced.
-    from aiogram.types import InlineKeyboardMarkup
-    from tars.bot.actions import build_followups_briefing_rows
+    # Send to Telegram with combined action buttons: follow-up rows +
+    # per-todo rows (each todo gets ⏰ ETA / 📌 Followup / ✖ Skip).
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from tars.bot.actions import (
+        build_followups_briefing_rows,
+        build_midday_todo_rows,
+        create_midday_todo_pendings,
+    )
 
     followup_ids = [int(f["id"]) for f in opens[:5]]
-    kb = None
-    if followup_ids:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=build_followups_briefing_rows(followup_ids)
-        )
 
     bot = Bot(token=cfg.telegram.bot_token)
     sent = 0
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
+                rows: list[list[InlineKeyboardButton]] = []
+                if followup_ids:
+                    rows.extend(build_followups_briefing_rows(followup_ids))
+                if review_todos:
+                    pending_ids = await create_midday_todo_pendings(
+                        db, chat_id=chat_id,
+                        items=review_todos,
+                        source_path="01_Projects/general_to_dos.md",
+                    )
+                    rows.extend(build_midday_todo_rows(pending_ids))
+                kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
                 await safe_send(bot, chat_id, text, reply_markup=kb)
                 sent += 1
             except Exception as e:  # noqa: BLE001
