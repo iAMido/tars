@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os as _os
+import re as _re
+import tempfile as _tempfile
 import time
 from datetime import datetime
+from pathlib import Path as _Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -189,6 +193,66 @@ async def list_notes(db, args: dict[str, Any]) -> str:
     return json.dumps({"notes": out, "count": len(out)}, ensure_ascii=False)
 
 
+async def delete_note(db, args: dict[str, Any]) -> str:
+    """Soft-delete a TARS note by id. Marks status='deleted' in the DB
+    (the row stays for audit) and removes the corresponding vault file at
+    _TARS/notes/note-NNNNN.md. Searches and lists filter deleted rows out.
+
+    Use when the user explicitly says \"delete note N\", \"remove note N\",
+    \"erase note N\". The action is essentially equivalent to deleting the
+    file in Obsidian — same end state, faster path.
+    """
+    try:
+        nid = int(args.get("note_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return json.dumps({"error": "delete_note requires integer note_id"})
+    row = await db.fetch_one(
+        "SELECT id, status FROM notes WHERE id = ?", (nid,),
+    )
+    if row is None:
+        return json.dumps({"error": f"note #{nid} does not exist"})
+    if row["status"] == "deleted":
+        return json.dumps({"ok": True, "note_id": nid, "already_deleted": True})
+
+    # Refuse to delete notes that are the SOURCE of an open follow-up — that
+    # would silently orphan the follow-up. Force the user to close it first.
+    fu_row = await db.fetch_one(
+        "SELECT id FROM follow_ups WHERE note_id = ? AND status = 'open' LIMIT 1",
+        (nid,),
+    )
+    if fu_row is not None:
+        return json.dumps({
+            "error": (
+                f"note #{nid} is the source of open follow-up "
+                f"#{int(fu_row['id'])}. Close the follow-up first "
+                f"(close_followup) or it will orphan."
+            ),
+        })
+
+    await db.execute(
+        "UPDATE notes SET status = 'deleted' WHERE id = ?", (nid,),
+    )
+
+    # Remove the vault file if present (best-effort — DB is source of truth).
+    file_removed = False
+    cfg = getattr(db, "_cfg", None)
+    if cfg is not None:
+        try:
+            file_path = _Path(cfg.paths.vault) / "_TARS" / "notes" / f"note-{nid:05d}.md"
+            if file_path.exists():
+                file_path.unlink()
+                file_removed = True
+        except Exception as e:  # noqa: BLE001
+            log.warning("delete_note: file unlink failed for %d (%s)", nid, e)
+
+    log.info("delete_note: note=%d file_removed=%s", nid, file_removed)
+    return json.dumps({
+        "ok": True,
+        "note_id": nid,
+        "file_removed": file_removed,
+    })
+
+
 async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
     query = (args.get("query") or "").strip()
     if not query:
@@ -295,11 +359,6 @@ async def web_research(db, args: dict[str, Any]) -> str:
 # vault_sweep ingests new files within 10 min, so anything written here will
 # show up as a new note (Path B in the data model) with auto-tagging based
 # on its PARA location.
-
-import os as _os
-import re as _re
-import tempfile as _tempfile
-from pathlib import Path as _Path
 
 _PARA_FOLDERS = {"00_Inbox", "01_Projects", "02_Areas", "03_Resources", "04_Archive"}
 
@@ -561,6 +620,7 @@ TOOL_REGISTRY = {
     "save_note": save_note,
     "get_note": get_note,
     "list_notes": list_notes,
+    "delete_note": delete_note,
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,

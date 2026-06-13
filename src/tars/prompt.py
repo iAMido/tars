@@ -85,6 +85,10 @@ SYSTEM_BLOCK = (
     "This is the correct tool for listing — not search_memory.\n"
     "- get_note: call when the user references a specific note by id "
     "(\"note 5\", \"[note:12]\"). Use this to verify before citing.\n"
+    "- delete_note: REQUIRED when user says \"delete note N\", \"remove note "
+    "N\", \"erase note N\". Soft-deletes the DB row and removes the vault "
+    "file. Refuses if note is the source of an open follow-up — close that "
+    "first then retry. Never claim deleted without calling the tool.\n"
     "- CITATION RULE — STRICT: only emit `[note:N]` when N was returned by "
     "a tool call you made THIS TURN (save_note, get_note, list_notes, or "
     "search_memory). If you did not call such a tool, your reply must "
@@ -235,6 +239,20 @@ TOOLS: list[dict] = [
                 "properties": {
                     "timezone": {"type": "string", "description": "IANA timezone name. Defaults to user's configured tz."},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_note",
+            "description": "Soft-delete a TARS note by id. Marks the row status='deleted' and removes the vault file at _TARS/notes/note-NNNNN.md. Same end state as deleting the .md file in Obsidian. Refuses if the note is the source of an OPEN follow-up — close the follow-up first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer", "description": "id of the note to delete"},
+                },
+                "required": ["note_id"],
             },
         },
     },
