@@ -316,6 +316,178 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         )
         await m.answer(text)
 
+    @dp.message(Command("help"), auth)
+    async def _help(m: Message) -> None:
+        await m.answer(
+            "*TARS commands*\n"
+            "\n"
+            "*Reading*\n"
+            "/notes [N] — last N notes (default 10)\n"
+            "/followups — open follow-ups with action buttons\n"
+            "/todos [folder] — open `- [ ]` items\n"
+            "/triage — un-promoted notes worth filing\n"
+            "/stats — costs, counts, next jobs\n"
+            "/feeds — RSS feeds (see /feeds for sub-commands)\n"
+            "\n"
+            "*Writing (fast-path, no LLM)*\n"
+            "`note: <body>` — instant save (also: `add note`, `הערה:`, etc.)\n"
+            "\n"
+            "*Manual triggers*\n"
+            "/briefing — fire morning briefing now\n"
+            "/midday — fire midday check-in now\n"
+            "/evening — fire evening wrap-up now\n"
+            "\n"
+            "*Misc*\n"
+            "/research <q> — web-RAG search (gpt-5:online)\n"
+            "/tier — current tier→model mapping\n"
+            "/clear — wipe my conversation memory\n"
+            "/whoami — debug: show your chat_id\n"
+            "\n"
+            "Or just type — I'll route to tools.",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("notes"), auth)
+    async def _notes(m: Message) -> None:
+        from tars.tools import list_notes as _list_notes
+        text = (m.text or "").removeprefix("/notes").strip()
+        try:
+            limit = int(text) if text else 10
+        except ValueError:
+            limit = 10
+        raw = await _list_notes(agent.db, {"limit": limit})
+        payload = json.loads(raw)
+        items = payload.get("notes") or []
+        if not items:
+            await m.answer("No notes yet.")
+            return
+        lines = [f"*Last {len(items)} notes*"]
+        for n in items:
+            lines.append(f"`[note:{n['id']}]` {n.get('preview','')[:120]}")
+        await m.answer(
+            "\n".join(lines), parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("followups"), auth)
+    async def _followups(m: Message) -> None:
+        from aiogram.types import InlineKeyboardMarkup
+        from tars.bot.actions import build_followups_briefing_rows
+        from tars.memory.follow_ups import list_open as _list_open
+        opens = await _list_open(agent.db, limit=10)
+        if not opens:
+            await m.answer("No open follow-ups.")
+            return
+        lines = ["*Open follow-ups*"]
+        ids: list[int] = []
+        for f in opens:
+            due_ts = f.get("due_at")
+            if due_ts:
+                from datetime import datetime as _dt
+                from zoneinfo import ZoneInfo as _Zi
+                due = _dt.fromtimestamp(due_ts, tz=_Zi(cfg.timezone)).strftime("%a %m-%d %H:%M")
+            else:
+                due = "no due"
+            body = (f.get("body") or "")[:100]
+            lines.append(f"`[followup:{f['followup_id']}]` {body} ({due})")
+            ids.append(int(f["followup_id"]))
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=build_followups_briefing_rows(ids[:5])
+        )
+        await m.answer(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=kb, disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("todos"), auth)
+    async def _todos(m: Message) -> None:
+        from tars.tools import list_open_todos as _todos_tool
+        text = (m.text or "").removeprefix("/todos").strip()
+        args = {"max_per_file": 8, "max_total": 30}
+        if text:
+            args["folder"] = text
+        raw = await _todos_tool(agent.db, args)
+        p = json.loads(raw)
+        files = p.get("files") or []
+        if not files:
+            await m.answer("No open todos found.")
+            return
+        lines = [f"*Open todos* ({p.get('total_open',0)} total)"]
+        for f in files[:5]:
+            lines.append(f"\n*{f['path']}* ({f['open_count']} open)")
+            for item in f["items"][:5]:
+                lines.append(f"- {item[:120]}")
+        await m.answer(
+            "\n".join(lines), parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("triage"), auth)
+    async def _triage(m: Message) -> None:
+        from aiogram.types import InlineKeyboardMarkup
+        from tars.bot.actions import build_triage_rows, create_triage_pendings
+        from tars.tools import suggest_promotions as _suggest
+        raw = await _suggest(agent.db, {"since_days": 30, "limit": 5, "min_score": 3})
+        p = json.loads(raw)
+        suggs = p.get("suggestions") or []
+        if not suggs:
+            await m.answer("Nothing worth triaging right now.")
+            return
+        lines = ["*Triage — promote or skip*"]
+        for i, s in enumerate(suggs, 1):
+            lines.append(
+                f"{i}. `[note:{s['id']}]` (score {s['score']}/10) "
+                f"{s.get('preview','')[:120]}"
+            )
+        pending_ids = await create_triage_pendings(
+            agent.db, chat_id=m.chat.id, suggestions=suggs,
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=build_triage_rows(pending_ids)
+        )
+        await m.answer(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=kb, disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("briefing"), auth)
+    async def _briefing(m: Message) -> None:
+        from tars.scheduler.morning_briefing import morning_briefing as _job
+        await m.answer("Firing morning briefing… (this takes ~30s)")
+        try:
+            r = await _job(agent, agent.db, cfg)
+            await m.answer(
+                f"✓ briefing sent. cost ${r.get('cost_usd',0):.4f} "
+                f"emails={r.get('emails',0)} cal={r.get('calendar',0)} "
+                f"followups={r.get('followups',0)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            await m.answer(f"Briefing failed: {e}")
+
+    @dp.message(Command("midday"), auth)
+    async def _midday(m: Message) -> None:
+        from tars.scheduler.midday_checkin import midday_checkin as _job
+        await m.answer("Firing midday check-in…")
+        try:
+            r = await _job(agent, agent.db, cfg)
+            await m.answer(f"✓ midday sent. cost ${r.get('cost_usd',0):.4f}")
+        except Exception as e:  # noqa: BLE001
+            await m.answer(f"Midday failed: {e}")
+
+    @dp.message(Command("evening"), auth)
+    async def _evening(m: Message) -> None:
+        from tars.scheduler.evening_wrapup import evening_wrapup as _job
+        await m.answer("Firing evening wrap-up…")
+        try:
+            r = await _job(agent, agent.db, cfg)
+            if r.get("skipped"):
+                await m.answer("Nothing to wrap up.")
+            else:
+                await m.answer(f"✓ evening sent. cost ${r.get('cost_usd',0):.4f}")
+        except Exception as e:  # noqa: BLE001
+            await m.answer(f"Evening failed: {e}")
+
     @dp.message(Command("tier"), auth)
     async def _tier_info(m: Message) -> None:
         t = cfg.tiers
