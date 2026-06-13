@@ -267,6 +267,21 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "suggest_promotions",
+            "description": "Score un-promoted TARS notes and return the top N most worth filing. Use when user asks 'what should I file?', 'what's promotable?'. Returns {id, note_id, created, preview, tags, score (0-10)}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "since_days": {"type": "integer", "default": 14},
+                    "limit": {"type": "integer", "default": 3},
+                    "min_score": {"type": "integer", "default": 4, "description": "exclude notes scoring below this (0-10)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_un_promoted_notes",
             "description": "List TARS notes (last N days) that have no [[note-NNNNN]] backlink in any PARA file — the 'to triage' view. Use when user asks 'what hasn't been filed?', 'what's un-triaged?', 'what still needs promoting?'.",
             "parameters": {

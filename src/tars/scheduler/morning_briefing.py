@@ -289,7 +289,7 @@ PROMPT_TEMPLATE = (
     "`` `[followup:N]` `` — Telegram's Markdown swallows `[...]` otherwise.\n"
     "- Possible section headers IN THIS ORDER: *Weather*, *Quote*, "
     "*Training*, *Today*, *Email*, *Pending replies*, *Calendar*, "
-    "*Open follow-ups*, *Open todos*, *Suggestions*, *Warnings*.\n"
+    "*Open follow-ups*, *Open todos*, *Triage*, *Suggestions*, *Warnings*.\n"
     "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
     "Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
@@ -373,6 +373,12 @@ PROMPT_TEMPLATE = (
     "specific actions). Skip vague placeholders ('-', single-word items). "
     "Skip the entire section if payload.open_todos is empty or all the "
     "items are noise.\n"
+    "\n"
+    "*Triage* — payload.triage is a list of un-promoted TARS notes that "
+    "look worth filing. Render as a NUMBERED list (\"1.\", \"2.\", ...) so "
+    "the inline buttons attached to the message correspond to numbered "
+    "items. Format: ``N. <preview>  `[note:<id>]` ``. Skip the section "
+    "entirely if payload.triage is empty.\n"
     "\n"
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
     "These are NOT things you (TARS) are doing — just things the user could "
@@ -471,6 +477,19 @@ async def morning_briefing(agent, db, cfg) -> dict:
             open_todos = parsed.get("files") or []
     except Exception as e:  # noqa: BLE001
         log.warning("morning_briefing: todos scan failed (%s)", e)
+
+    # Triage suggestions — top 3 most-promotable un-filed TARS notes.
+    triage_suggestions: list[dict] = []
+    try:
+        from tars.tools import suggest_promotions
+        import json as _json_inner
+        raw = await suggest_promotions(db, {
+            "since_days": 14, "limit": 3, "min_score": 5,
+        })
+        parsed = _json_inner.loads(raw)
+        triage_suggestions = parsed.get("suggestions") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("morning_briefing: triage scan failed (%s)", e)
     warnings = [w for w in (email_err, cal_err) if w]
 
     # Cross-reference: attach by_attendee context onto each calendar event.
@@ -550,6 +569,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
         payload["open_followups"] = fus
     if open_todos:
         payload["open_todos"] = open_todos
+    if triage_suggestions:
+        payload["triage"] = triage_suggestions
     if recent_notes:
         payload["recent_notes"] = recent_notes
     if relevant_notes:
@@ -593,7 +614,9 @@ async def morning_briefing(agent, db, cfg) -> dict:
     from tars.bot.actions import (
         build_followups_briefing_rows,
         build_suggestion_keyboard,
+        build_triage_rows,
         create_pending,
+        create_triage_pendings,
     )
     from tars.bot.send import safe_send
 
@@ -606,20 +629,26 @@ async def morning_briefing(agent, db, cfg) -> dict:
     try:
         for chat_id in cfg.telegram.allowed_chat_ids:
             try:
-                # Compose keyboard rows: follow-up rows first (most
-                # actionable), then suggestion rows.
+                # Compose keyboard rows: follow-up rows first, then triage,
+                # then suggestion rows. Order matches the briefing section
+                # order so taps line up visually.
                 rows: list[list[InlineKeyboardButton]] = []
                 if followup_ids_in_briefing:
                     rows.extend(build_followups_briefing_rows(
                         followup_ids_in_briefing
                     ))
+                if triage_suggestions:
+                    triage_pending_ids = await create_triage_pendings(
+                        db, chat_id=chat_id,
+                        suggestions=triage_suggestions,
+                    )
+                    rows.extend(build_triage_rows(triage_pending_ids))
                 if suggestion_texts:
                     pending_ids = await create_pending(
                         db, chat_id=chat_id,
                         suggestions=[{"text": s} for s in suggestion_texts],
                         briefing_date=today,
                     )
-                    # build_suggestion_keyboard already builds rows internally.
                     sk = build_suggestion_keyboard(pending_ids)
                     rows.extend(sk.inline_keyboard)
                 kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None

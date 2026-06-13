@@ -438,6 +438,143 @@ async def list_un_promoted_notes(db, args: dict[str, Any]) -> str:
     }, ensure_ascii=False)
 
 
+_ACTION_VERBS = (
+    "call", "send", "email", "reply", "schedule", "book", "buy", "order",
+    "review", "read", "watch", "research", "investigate", "build", "fix",
+    "refactor", "deploy", "test", "check", "verify", "ask", "follow up",
+    "draft", "write", "edit", "update", "upgrade", "renew", "cancel",
+    "pay", "transfer", "remind", "prepare", "plan", "design",
+)
+
+
+def _promotability_score(body: str, tags: list) -> int:
+    """Heuristic 0-10 score on how worth promoting a TARS note is. Higher
+    means more likely to be project-shaped (rather than a one-line
+    capture)."""
+    if not body:
+        return 0
+    s = 0
+    blen = len(body)
+    if blen >= 80:
+        s += 1
+    if blen >= 200:
+        s += 2
+    if blen >= 600:
+        s += 1
+    # Multi-line content
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    if len(lines) >= 3:
+        s += 1
+    if len(lines) >= 6:
+        s += 1
+    # Action verb presence
+    lower = body.lower()
+    if any(v in lower for v in _ACTION_VERBS):
+        s += 2
+    # Mentions a date or money
+    if _re.search(r"\b\d{4}-\d{2}-\d{2}\b", body) or _re.search(
+        r"[\$£€₪]\s?\d", body,
+    ):
+        s += 1
+    # Has actual checklist or bullets
+    if _re.search(r"^\s*[-*]\s", body, _re.MULTILINE):
+        s += 1
+    # Tags hint at intent
+    if tags:
+        s += 1
+    return min(s, 10)
+
+
+async def suggest_promotions(db, args: dict[str, Any]) -> str:
+    """Score un-promoted TARS notes (last N days) and return the top K
+    most-promotable ones. Use when the user asks 'what should I file?',
+    'what's worth promoting?', or the briefing's *Triage* section.
+
+    Builds on list_un_promoted_notes — same backlink-detection logic —
+    but adds a promotability score and ranks. Excludes anything scoring
+    below `min_score` (default 4).
+
+    Args:
+      since_days: only consider notes from last N days (default 14)
+      limit:      max suggestions to return (default 3, cap 10)
+      min_score:  exclude notes scoring below this (default 4 / 10)
+    """
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return json.dumps({"error": "vault unavailable: cfg not bound"})
+    try:
+        since_days = max(1, int(args.get("since_days") or 14))
+    except (TypeError, ValueError):
+        since_days = 14
+    try:
+        limit = max(1, min(int(args.get("limit") or 3), 10))
+    except (TypeError, ValueError):
+        limit = 3
+    try:
+        min_score = max(0, min(int(args.get("min_score") or 4), 10))
+    except (TypeError, ValueError):
+        min_score = 4
+
+    cutoff = int(time.time()) - since_days * 86400
+
+    rows = await db.fetch_all(
+        "SELECT id, datetime(created_at,'unixepoch','localtime') AS created, "
+        "       body, tags "
+        "FROM notes "
+        "WHERE created_at >= ? "
+        "  AND status NOT IN ('deleted', 'closed') "
+        "  AND source = 'agent' "
+        "  AND (tags IS NULL OR tags NOT LIKE '%source/reminder-ping%') "
+        "ORDER BY id DESC LIMIT ?",
+        (cutoff, limit * 5),
+    )
+    if not rows:
+        return json.dumps({"suggestions": [], "total": 0})
+
+    files = _vault_para_md_files(cfg)
+    referenced: set[int] = set()
+    for p in files:
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        for m in _NOTE_BACKLINK_RE.finditer(content):
+            try:
+                referenced.add(int(m.group(1)))
+            except ValueError:
+                pass
+
+    scored: list[dict] = []
+    for r in rows:
+        nid = int(r["id"])
+        if nid in referenced:
+            continue
+        body = r["body"] or ""
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except json.JSONDecodeError:
+            tags = []
+        score = _promotability_score(body, tags)
+        if score < min_score:
+            continue
+        scored.append({
+            "id": nid,
+            "note_id": nid,
+            "created": r["created"],
+            "preview": body.strip().split("\n")[0][:160],
+            "tags": tags,
+            "score": score,
+        })
+
+    scored.sort(key=lambda x: (-x["score"], -x["id"]))
+    suggestions = scored[:limit]
+    return json.dumps({
+        "since_days": since_days,
+        "total": len(suggestions),
+        "suggestions": suggestions,
+    }, ensure_ascii=False)
+
+
 async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
     query = (args.get("query") or "").strip()
     if not query:
@@ -808,6 +945,7 @@ TOOL_REGISTRY = {
     "delete_note": delete_note,
     "list_open_todos": list_open_todos,
     "list_un_promoted_notes": list_un_promoted_notes,
+    "suggest_promotions": suggest_promotions,
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,

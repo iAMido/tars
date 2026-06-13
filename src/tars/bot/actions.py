@@ -749,6 +749,183 @@ async def handle_midday_todo_eta_reply(message, agent, cfg) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Morning *Triage* section — promote / skip per un-filed note
+# ---------------------------------------------------------------------------
+#
+# Each suggested note gets a pending_actions row (kind='triage') so the
+# 64-byte callback_data limit is satisfied.
+#
+# Verbs:
+#   p    — ForceReply "Which folder?" → call promote_note(note_id, folder)
+#   skip — mark consumed, no action
+
+
+def build_triage_rows(pending_ids: Sequence[int]) -> list[list[InlineKeyboardButton]]:
+    """One row per triage suggestion: 📌 Promote / ✖ Skip."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for pid in pending_ids:
+        rows.append([
+            InlineKeyboardButton(text="📌 Promote", callback_data=f"tp:p:{pid}"),
+            InlineKeyboardButton(text="✖ Skip",    callback_data=f"tp:skip:{pid}"),
+        ])
+    return rows
+
+
+async def create_triage_pendings(
+    db, chat_id: int, suggestions: list[dict],
+) -> list[int]:
+    """Insert one pending_actions row per triage suggestion. Returns ids
+    in input order."""
+    ids: list[int] = []
+    now = int(time.time())
+    for s in suggestions:
+        extra_json = json.dumps({
+            "note_id": int(s.get("id") or s.get("note_id") or 0),
+        })
+        cur = await db.execute(
+            "INSERT INTO pending_actions("
+            " chat_id, kind, text, extra, created_at"
+            ") VALUES (?, 'triage', ?, ?, ?)",
+            (
+                int(chat_id),
+                (s.get("preview") or "")[:200],
+                extra_json,
+                now,
+            ),
+        )
+        ids.append(int(cur.lastrowid or 0))
+    return ids
+
+
+async def handle_triage_callback(callback, bot: Bot, agent, cfg) -> None:
+    """Route tp:<verb>:<pending_id> from per-suggestion buttons in
+    morning briefing *Triage*."""
+    data = (callback.data or "").strip()
+    try:
+        _, verb, pid_str = data.split(":", 2)
+        sid = int(pid_str)
+    except (ValueError, IndexError):
+        await callback.answer("bad data")
+        return
+
+    row = await agent.db.fetch_one(
+        "SELECT id, chat_id, text, extra, consumed_at FROM pending_actions WHERE id = ?",
+        (sid,),
+    )
+    if row is None:
+        await callback.answer("already gone")
+        return
+    if row["consumed_at"] is not None:
+        await callback.answer("already handled")
+        await _replace_row_with_status(callback, bot, sid, "already handled")
+        return
+
+    try:
+        extra = json.loads(row["extra"] or "{}")
+    except json.JSONDecodeError:
+        extra = {}
+    note_id = int(extra.get("note_id") or 0)
+    status_text = ""
+    result_payload: dict = {}
+
+    try:
+        if verb == "skip":
+            status_text = f"✖ skipped [note:{note_id}]"
+            result_payload = {"note_id": note_id}
+
+        elif verb == "p":
+            # ForceReply for folder. User replies with vault-relative folder.
+            prompt = (
+                f"📌 Promote [note:{note_id}] to which folder?\n"
+                f"_{(row['text'] or '')[:160]}_\n\n"
+                f"Reply with a PARA path — e.g. `01_Projects/Work`, "
+                f"`02_Areas/Health`, `03_Resources`."
+            )
+            sent = await bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=prompt,
+                parse_mode="Markdown",
+                reply_markup=ForceReply(
+                    input_field_placeholder="e.g. 01_Projects/Work", selective=True,
+                ),
+            )
+            await agent.db.execute(
+                "UPDATE pending_actions SET awaiting_kind = ?, "
+                " prompt_message_id = ? WHERE id = ?",
+                ("triage_folder", sent.message_id, sid),
+            )
+            await callback.answer("Reply with the folder")
+            await _replace_row_with_status(callback, bot, sid, "⌛ awaiting folder…")
+            return
+
+        else:
+            status_text = f"unknown verb {verb!r}"
+
+    except Exception as e:  # noqa: BLE001
+        log.exception("triage %s for pending=%d failed", verb, sid)
+        status_text = f"error: {type(e).__name__}"
+
+    await agent.db.execute(
+        "UPDATE pending_actions SET consumed_at = ?, consumed_action = ?, "
+        " consumed_result = ? WHERE id = ?",
+        (int(time.time()), verb, json.dumps(result_payload), sid),
+    )
+    await _replace_row_with_status(callback, bot, sid, status_text)
+    await callback.answer(status_text)
+
+
+async def handle_triage_folder_reply(message, agent, cfg) -> bool:
+    """User replied to the 'Which folder?' ForceReply prompt. Calls
+    promote_note(note_id, dest_folder). Returns True if handled."""
+    if message.reply_to_message is None:
+        return False
+    prompt_msg_id = message.reply_to_message.message_id
+    row = await agent.db.fetch_one(
+        "SELECT id, text, extra FROM pending_actions "
+        "WHERE awaiting_kind = 'triage_folder' AND prompt_message_id = ? "
+        "  AND consumed_at IS NULL",
+        (prompt_msg_id,),
+    )
+    if row is None:
+        return False
+
+    sid = int(row["id"])
+    try:
+        extra = json.loads(row["extra"] or "{}")
+    except json.JSONDecodeError:
+        extra = {}
+    note_id = int(extra.get("note_id") or 0)
+    folder = (message.text or "").strip()
+    if not folder:
+        await message.reply("Empty folder. Try again.")
+        return True
+
+    # Call promote_note directly (not via run_tool — we already have note_id).
+    from tars.tools import promote_note as _promote_note
+    raw = await _promote_note(agent.db, {
+        "note_id": note_id, "dest_folder": folder,
+    })
+    payload = json.loads(raw)
+    if payload.get("ok"):
+        await agent.db.execute(
+            "UPDATE pending_actions SET consumed_at = ?, "
+            " consumed_action = 'p', consumed_result = ? WHERE id = ?",
+            (int(time.time()), json.dumps(payload), sid),
+        )
+        await message.reply(
+            f"📌 Promoted [note:{note_id}] → `{payload.get('path')}`",
+            parse_mode="Markdown",
+        )
+    else:
+        err = payload.get("error") or "unknown error"
+        await message.reply(
+            f"Promotion failed: {err}\nReply again with a valid PARA path.",
+            parse_mode="Markdown",
+        )
+    return True
+
+
 async def _replace_row_with_status(callback, bot: Bot, sid: int, status: str) -> None:
     """Replace the button row for the given suggestion id with a single
     status button so the user sees what happened without losing context."""
