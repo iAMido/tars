@@ -253,6 +253,174 @@ async def delete_note(db, args: dict[str, Any]) -> str:
     })
 
 
+_TODO_OPEN_RE = _re.compile(r"^(\s*)-\s*\[ \]\s+(.+?)\s*$", _re.MULTILINE)
+_NOTE_BACKLINK_RE = _re.compile(r"\[\[note-(\d{1,8})\]\]")
+
+
+def _vault_para_md_files(cfg) -> list[_Path]:
+    """Walk PARA folders under the vault root, yield .md files. Excludes
+    dotfolders, _TARS, _Templates."""
+    out: list[_Path] = []
+    try:
+        vault = _Path(cfg.paths.vault)
+    except Exception:  # noqa: BLE001
+        return out
+    for folder in sorted(_PARA_FOLDERS):
+        root = vault / folder
+        if not root.exists():
+            continue
+        for p in root.rglob("*.md"):
+            # skip dot-prefixed parts
+            if any(part.startswith(".") for part in p.parts):
+                continue
+            out.append(p)
+    return out
+
+
+async def list_open_todos(db, args: dict[str, Any]) -> str:
+    """Scan PARA markdown files for open checkbox items (`- [ ] X`).
+    Excludes completed items (`- [x]`). Use when the user asks
+    \"what's on my todo list?\", \"open todos?\", \"what work is pending?\".
+
+    Args:
+      folder:        optional vault-relative folder filter (e.g. '01_Projects/Work')
+      max_per_file:  per-file cap on items returned (default 10)
+      max_total:     overall cap (default 50)
+    """
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return json.dumps({"error": "vault unavailable: cfg not bound"})
+    folder_filter = (args.get("folder") or "").strip().replace("\\", "/")
+    try:
+        max_per = max(1, min(int(args.get("max_per_file") or 10), 50))
+    except (TypeError, ValueError):
+        max_per = 10
+    try:
+        max_total = max(1, min(int(args.get("max_total") or 50), 200))
+    except (TypeError, ValueError):
+        max_total = 50
+
+    files = _vault_para_md_files(cfg)
+    vault_root = _Path(cfg.paths.vault).resolve()
+
+    results: list[dict] = []
+    total = 0
+    for p in files:
+        try:
+            rel = str(p.resolve().relative_to(vault_root)).replace("\\", "/")
+        except ValueError:
+            continue
+        if folder_filter and not rel.startswith(folder_filter):
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        matches = _TODO_OPEN_RE.findall(content)
+        if not matches:
+            continue
+        items = [m[1].strip() for m in matches[:max_per]]
+        results.append({
+            "path": rel,
+            "open_count": len(matches),
+            "items_shown": len(items),
+            "items": items,
+        })
+        total += len(items)
+        if total >= max_total:
+            break
+    # Most-todo files first.
+    results.sort(key=lambda r: r["open_count"], reverse=True)
+    grand_total = sum(r["open_count"] for r in results)
+    return json.dumps({
+        "total_open": grand_total,
+        "files_with_todos": len(results),
+        "files": results,
+    }, ensure_ascii=False)
+
+
+async def list_un_promoted_notes(db, args: dict[str, Any]) -> str:
+    """List TARS-captured notes (last N days) that don't yet have a
+    `[[note-NNNNN]]` backlink in any PARA file. The user's \"to triage\"
+    inbox view — notes they haven't yet decided to file as projects.
+
+    Excludes auto-generated reminder-close notes (tagged source/reminder-ping).
+    Use when the user asks \"what hasn't been filed?\", \"what's un-triaged?\",
+    \"what still needs to be promoted?\".
+
+    Args:
+      since_days:  only consider notes from the last N days (default 14)
+      limit:       max notes to return (default 20, cap 100)
+    """
+    cfg = getattr(db, "_cfg", None)
+    if cfg is None:
+        return json.dumps({"error": "vault unavailable: cfg not bound"})
+    try:
+        since_days = max(1, int(args.get("since_days") or 14))
+    except (TypeError, ValueError):
+        since_days = 14
+    try:
+        limit = max(1, min(int(args.get("limit") or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    cutoff = int(time.time()) - since_days * 86400
+
+    # Collect candidate notes from DB.
+    rows = await db.fetch_all(
+        "SELECT id, datetime(created_at,'unixepoch','localtime') AS created, "
+        "       body, tags "
+        "FROM notes "
+        "WHERE created_at >= ? "
+        "  AND status NOT IN ('deleted', 'closed') "
+        "  AND source = 'agent' "
+        "  AND (tags IS NULL OR tags NOT LIKE '%source/reminder-ping%') "
+        "ORDER BY id DESC LIMIT ?",
+        (cutoff, limit * 3),  # over-fetch since we'll filter
+    )
+    if not rows:
+        return json.dumps({"total_un_promoted": 0, "notes": []})
+
+    # Build the set of note-ids referenced by PARA files.
+    files = _vault_para_md_files(cfg)
+    referenced: set[int] = set()
+    for p in files:
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        for m in _NOTE_BACKLINK_RE.finditer(content):
+            try:
+                referenced.add(int(m.group(1)))
+            except ValueError:
+                pass
+
+    un_promoted: list[dict] = []
+    for r in rows:
+        nid = int(r["id"])
+        if nid in referenced:
+            continue
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except json.JSONDecodeError:
+            tags = []
+        un_promoted.append({
+            "id": nid,
+            "note_id": nid,
+            "created": r["created"],
+            "preview": (r["body"] or "").strip().split("\n")[0][:200],
+            "tags": tags,
+        })
+        if len(un_promoted) >= limit:
+            break
+
+    return json.dumps({
+        "total_un_promoted": len(un_promoted),
+        "since_days": since_days,
+        "notes": un_promoted,
+    }, ensure_ascii=False)
+
+
 async def search_memory(db, args: dict[str, Any], *, cfg=None) -> str:
     query = (args.get("query") or "").strip()
     if not query:
@@ -621,6 +789,8 @@ TOOL_REGISTRY = {
     "get_note": get_note,
     "list_notes": list_notes,
     "delete_note": delete_note,
+    "list_open_todos": list_open_todos,
+    "list_un_promoted_notes": list_un_promoted_notes,
     "search_memory": search_memory,
     "open_followup": open_followup,
     "close_followup": close_followup,

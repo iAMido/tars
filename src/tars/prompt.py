@@ -89,6 +89,13 @@ SYSTEM_BLOCK = (
     "N\", \"erase note N\". Soft-deletes the DB row and removes the vault "
     "file. Refuses if note is the source of an open follow-up — close that "
     "first then retry. Never claim deleted without calling the tool.\n"
+    "- list_open_todos: when user asks about \"todos\", \"open tasks\", "
+    "\"what's pending\", \"my to-do list\". Parses `- [ ]` checkboxes from "
+    "PARA files. Returns structured data — don't just dump it; pick the "
+    "most relevant or summarize by file.\n"
+    "- list_un_promoted_notes: when user asks \"what hasn't been filed?\", "
+    "\"to triage\", \"what's in my inbox?\". Lists TARS notes without a "
+    "[[note-NNNNN]] backlink in any PARA file.\n"
     "- CITATION RULE — STRICT: only emit `[note:N]` when N was returned by "
     "a tool call you made THIS TURN (save_note, get_note, list_notes, or "
     "search_memory). If you did not call such a tool, your reply must "
@@ -238,6 +245,35 @@ TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "timezone": {"type": "string", "description": "IANA timezone name. Defaults to user's configured tz."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_open_todos",
+            "description": "Scan PARA markdown files for open checkbox items (lines like `- [ ] X`). Excludes completed (`- [x]`). Use when the user asks 'what's on my todo list?', 'open todos?', 'what's pending in work?'. Returns counts + items grouped by file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "optional folder filter, e.g. '01_Projects/Work'"},
+                    "max_per_file": {"type": "integer", "default": 10},
+                    "max_total": {"type": "integer", "default": 50},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_un_promoted_notes",
+            "description": "List TARS notes (last N days) that have no [[note-NNNNN]] backlink in any PARA file — the 'to triage' view. Use when user asks 'what hasn't been filed?', 'what's un-triaged?', 'what still needs promoting?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "since_days": {"type": "integer", "default": 14},
+                    "limit": {"type": "integer", "default": 20},
                 },
             },
         },

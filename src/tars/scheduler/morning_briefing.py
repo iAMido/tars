@@ -289,7 +289,7 @@ PROMPT_TEMPLATE = (
     "`` `[followup:N]` `` — Telegram's Markdown swallows `[...]` otherwise.\n"
     "- Possible section headers IN THIS ORDER: *Weather*, *Quote*, "
     "*Training*, *Today*, *Email*, *Pending replies*, *Calendar*, "
-    "*Open follow-ups*, *Suggestions*, *Warnings*.\n"
+    "*Open follow-ups*, *Open todos*, *Suggestions*, *Warnings*.\n"
     "- Headers use SINGLE asterisks: `*Email*`. Never `**double**` — "
     "Telegram renders that literally.\n"
     "- No greeting, no sign-off, no commentary outside section bodies.\n"
@@ -362,6 +362,17 @@ PROMPT_TEMPLATE = (
     "with `` `[note:N]` ``.\n"
     "\n"
     "*Open follow-ups* — one bullet per item: ``- <body> (due_human) `[followup:N]` ``.\n"
+    "\n"
+    "*Open todos* — surface open `- [ ]` items from PARA files. Group by "
+    "FILE (one sub-section per file with the file as bold). Cap at 3 files "
+    "and 4 items per file. Skip any file with zero open. Format:\n"
+    "  *<path>* (<open_count> open)\n"
+    "  - <item 1>\n"
+    "  - <item 2>\n"
+    "Choose items that look most action-worthy (deadlines, names, "
+    "specific actions). Skip vague placeholders ('-', single-word items). "
+    "Skip the entire section if payload.open_todos is empty or all the "
+    "items are noise.\n"
     "\n"
     "*Suggestions* — purely OPTIONAL ideas the user might want to act on. "
     "These are NOT things you (TARS) are doing — just things the user could "
@@ -443,6 +454,18 @@ async def morning_briefing(agent, db, cfg) -> dict:
     weather = await fetch_today_forecast(cfg)       # None on failure or no key
     quote = await fetch_quote_of_the_day()          # None on failure
     training = await fetch_today_training(cfg)      # None when no plan or not configured
+
+    # Open todos scanned from PARA files. Capped tight to keep payload sane.
+    open_todos: list[dict] = []
+    try:
+        from tars.tools import list_open_todos
+        import json as _json_inner
+        raw = await list_open_todos(db, {"max_per_file": 5, "max_total": 12})
+        parsed = _json_inner.loads(raw)
+        if parsed.get("total_open"):
+            open_todos = parsed.get("files") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("morning_briefing: todos scan failed (%s)", e)
     warnings = [w for w in (email_err, cal_err) if w]
 
     # Cross-reference: attach by_attendee context onto each calendar event.
@@ -520,6 +543,8 @@ async def morning_briefing(agent, db, cfg) -> dict:
         payload["calendar"] = enriched_cal
     if fus:
         payload["open_followups"] = fus
+    if open_todos:
+        payload["open_todos"] = open_todos
     if recent_notes:
         payload["recent_notes"] = recent_notes
     if relevant_notes:
