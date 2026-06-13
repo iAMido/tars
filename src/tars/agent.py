@@ -291,8 +291,8 @@ class Agent:
                 continue  # loop back into the LLM with tool results in context
 
             # No tool calls: this is the final assistant turn.
-            final_text = _strip_unverified_note_citations(
-                resp.text, verified_note_ids, thread_key,
+            final_text = await _strip_unverified_note_citations(
+                resp.text, verified_note_ids, thread_key, self.db,
             )
 
             await self._save_turn(
@@ -338,8 +338,8 @@ class Agent:
                 thread_key=thread_key,
             )
             total_cost += final_resp.cost_usd
-            final_text = _strip_unverified_note_citations(
-                final_resp.text or "Done.", verified_note_ids, thread_key,
+            final_text = await _strip_unverified_note_citations(
+                final_resp.text or "Done.", verified_note_ids, thread_key, self.db,
             )
             await self._save_turn(
                 thread_key, "assistant", final_text,
@@ -415,21 +415,36 @@ def _looks_like_question(text: str) -> bool:
     return False
 
 
-def _strip_unverified_note_citations(
-    text: str, verified_ids: set[int], thread_key: str,
+async def _strip_unverified_note_citations(
+    text: str, verified_ids: set[int], thread_key: str, db,
 ) -> str:
     """If the model cited any [note:N] for an id that was not surfaced by a
-    note-touching tool this turn, the id is unverified — likely hallucinated.
+    note-touching tool this turn AND doesn't exist in the DB at all, the id
+    is hallucinated — strip it.
 
-    Action: replace the citation with `[note:?unverified]` and log loudly so
-    we can audit. We do NOT silently delete: the user should see that the
-    model claimed a note id, and we want to flag the claim as suspicious."""
+    A note id that's not in the turn's context but DOES exist in the notes
+    table is a legitimate cross-reference (the model is correctly linking
+    related content from prior briefings) — leave it alone."""
     if not text:
         return text
     cited = {int(m.group(1)) for m in _NOTE_CITE_RE.finditer(text)}
     if not cited:
         return text
-    bogus = cited - verified_ids
+    suspect = cited - verified_ids
+    if not suspect:
+        return text
+
+    # Check each suspect id against the DB. Real ids stay; only truly
+    # nonexistent / deleted ids count as bogus.
+    bogus: set[int] = set()
+    if suspect:
+        placeholders = ",".join("?" * len(suspect))
+        rows = await db.fetch_all(
+            f"SELECT id FROM notes WHERE id IN ({placeholders}) AND status != 'deleted'",
+            tuple(suspect),
+        )
+        real_ids = {int(r["id"]) for r in rows}
+        bogus = suspect - real_ids
     if not bogus:
         return text
 
