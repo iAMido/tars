@@ -331,6 +331,8 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             "\n"
             "*Writing (fast-path, no LLM)*\n"
             "`note: <body>` — instant save (also: `add note`, `הערה:`, etc.)\n"
+            "/promote <note\\_id> <folder> — file a note into PARA\n"
+            "/done <followup\\_id> — close a follow-up\n"
             "\n"
             "*Manual triggers*\n"
             "/briefing — fire morning briefing now\n"
@@ -450,6 +452,70 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
             "\n".join(lines), parse_mode="Markdown",
             reply_markup=kb, disable_web_page_preview=True,
         )
+
+    @dp.message(Command("promote"), auth)
+    async def _promote(m: Message) -> None:
+        """`/promote <note_id> <dest_folder>` — direct call to promote_note,
+        no LLM. Example: `/promote 45 01_Projects/Work`."""
+        from tars.tools import promote_note as _promote_note
+        raw = (m.text or "").removeprefix("/promote").strip()
+        # Accept tail after note_id as the folder, allowing spaces.
+        parts = raw.split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            await m.answer(
+                "Usage: `/promote <note_id> <dest_folder>`\n"
+                "Example: `/promote 45 01_Projects/Work`",
+                parse_mode="Markdown",
+            )
+            return
+        nid = int(parts[0])
+        folder = parts[1].strip()
+        out = await _promote_note(agent.db, {"note_id": nid, "dest_folder": folder})
+        payload = json.loads(out)
+        if payload.get("ok"):
+            await m.answer(
+                f"📌 Promoted `[note:{nid}]` → `{payload['path']}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await m.answer(f"Promote failed: {payload.get('error','unknown')}")
+
+    @dp.message(Command("done"), auth)
+    async def _done(m: Message) -> None:
+        """`/done <followup_id>` — close a follow-up with an auto-generated
+        resolving note (same path as the ✅ Done button)."""
+        from tars.bot.actions import _close_followup_with_synthetic_note
+        raw = (m.text or "").removeprefix("/done").strip()
+        if not raw.isdigit():
+            await m.answer(
+                "Usage: `/done <followup_id>`\nExample: `/done 5`",
+                parse_mode="Markdown",
+            )
+            return
+        fu_id = int(raw)
+        row = await agent.db.fetch_one(
+            "SELECT fu.note_id, fu.status, n.body "
+            "FROM follow_ups fu JOIN notes n ON n.id = fu.note_id "
+            "WHERE fu.id = ?",
+            (fu_id,),
+        )
+        if row is None:
+            await m.answer(f"Follow-up #{fu_id} does not exist.")
+            return
+        if row["status"] != "open":
+            await m.answer(f"Follow-up #{fu_id} is already {row['status']}.")
+            return
+        try:
+            resolving = await _close_followup_with_synthetic_note(
+                agent.db, fu_id, row["body"] or "", cfg.timezone,
+            )
+            await m.answer(
+                f"✅ Closed `[followup:{fu_id}]`. Resolving note "
+                f"`[note:{resolving}]`.",
+                parse_mode="Markdown",
+            )
+        except Exception as e:  # noqa: BLE001
+            await m.answer(f"Close failed: {e}")
 
     @dp.message(Command("briefing"), auth)
     async def _briefing(m: Message) -> None:
