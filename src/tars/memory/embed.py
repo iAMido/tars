@@ -40,11 +40,6 @@ def pack_float32(vec: Sequence[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-# Back-compat alias so other modules that imported pack_int8 don't break.
-# The function returns float32 bytes now; callers don't care about the encoding.
-pack_int8 = pack_float32
-
-
 class Embedder:
     """Thin async wrapper around voyageai.AsyncClient."""
 

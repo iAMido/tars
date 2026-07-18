@@ -513,8 +513,30 @@ async def morning_briefing(agent, db, cfg) -> dict:
 
     # Annotate pending replies with how stale each one is so the LLM can
     # phrase the urgency correctly.
+    #
+    # Dedup against previously-shown items: without this, the same 10 stale
+    # unread emails appeared in EVERY briefing forever (logs showed pending=10
+    # daily for two weeks straight), which trains the reader to skim past the
+    # section. Policy: weekdays show only items not yet shown; Sunday re-shows
+    # the full backlog as a weekly review.
+    from tars.scheduler.email_summary import state_get, state_set
+    shown_ids: set[str] = set()
+    try:
+        raw_shown = await state_get(db, "briefing.pending_shown_ids")
+        if raw_shown:
+            shown_ids = set(json.loads(raw_shown))
+    except Exception as e:  # noqa: BLE001
+        log.warning("pending-shown state read failed (%s)", e)
+    is_sunday = now_dt.weekday() == 6
+
     pending: list[dict] = []
+    current_ids: list[str] = []
     for m in (intel.get("pending_replies") or []):
+        mid = str(m.get("id") or "")
+        if mid:
+            current_ids.append(mid)
+        if not is_sunday and mid and mid in shown_ids:
+            continue  # already surfaced on a previous weekday
         ts = m.get("internal_ts") or 0
         days_old = max(1, int((now - ts) / 86400)) if ts else None
         pending.append({
@@ -522,6 +544,13 @@ async def morning_briefing(agent, db, cfg) -> dict:
             "date": m["date"], "snippet": m["snippet"],
             "days_old": days_old,
         })
+    # Persist the CURRENT stale set (not the union) so items the user
+    # archived/replied to drop out and can legitimately reappear if they
+    # go stale again later.
+    try:
+        await state_set(db, "briefing.pending_shown_ids", json.dumps(current_ids))
+    except Exception as e:  # noqa: BLE001
+        log.warning("pending-shown state write failed (%s)", e)
 
     emails = intel.get("overnight_unread") or []
 

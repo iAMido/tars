@@ -18,7 +18,7 @@ import time
 from typing import Iterable
 
 from tars.db import Database
-from tars.memory.embed import EMBED_MAX_BATCH, Embedder, pack_int8
+from tars.memory.embed import EMBED_MAX_BATCH, Embedder, pack_float32
 
 log = logging.getLogger("tars.memory.index")
 
@@ -193,7 +193,7 @@ async def index_single_doc(
     await db.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
     await db.execute(
         "INSERT INTO vec_docs(doc_id, embedding) VALUES (?, ?)",
-        (doc_id, pack_int8(vecs[0])),
+        (doc_id, pack_float32(vecs[0])),
     )
     await db.execute(
         "UPDATE doc_index SET indexed_at = ?, body_hash = ? WHERE doc_id = ?",
@@ -257,7 +257,7 @@ async def reindex_brain_docs(db: Database, embedder: Embedder, *, full: bool = F
         await db.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
         await db.execute(
             "INSERT INTO vec_docs(doc_id, embedding) VALUES (?, ?)",
-            (doc_id, pack_int8(vec)),
+            (doc_id, pack_float32(vec)),
         )
         await db.execute(
             "UPDATE doc_index SET indexed_at = ?, body_hash = ? WHERE doc_id = ?",

@@ -81,7 +81,23 @@ class CircuitOpen(Exception):
 
 _cooldowns: dict[str, float] = {}                   # provider -> unix_ts when ok again
 _daily_spend: dict[tuple[str, str], float] = {}     # (provider, yyyy-mm-dd) -> usd
+_spend_seeded: set[tuple[str, str]] = set()         # (provider, day) seeded from DB
 _state_lock = asyncio.Lock()
+
+# Shared HTTP client with connection pooling. Creating a fresh AsyncClient
+# per call (the old pattern) paid a full TCP+TLS handshake to the same host
+# on every single LLM call — ~100-200ms of pure latency per Telegram reply.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT_SECONDS,
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
+    return _http_client
 
 
 def _today() -> str:
@@ -110,6 +126,35 @@ async def _record_spend(provider: str, usd: float) -> None:
         _daily_spend[key] = _daily_spend.get(key, 0.0) + usd
 
 
+async def _seed_spend_from_db(provider: str, db) -> None:
+    """Seed today's in-memory spend counter from cost_ledger on first use.
+
+    Without this, every process restart zeroed the counter — during heavy
+    dev days (30+ restarts) the daily cap was toothless. cost_ledger is the
+    durable record; read it once per (provider, day)."""
+    key = (provider, _today())
+    if key in _spend_seeded:
+        return
+    async with _state_lock:
+        if key in _spend_seeded:  # double-check under lock
+            return
+        try:
+            midnight_utc = time.mktime(time.strptime(_today(), "%Y-%m-%d")) - time.timezone
+            row = await db.fetch_one(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) AS c FROM cost_ledger "
+                "WHERE provider = ? AND ts >= ?",
+                (provider, int(midnight_utc)),
+            )
+            db_spend = float(row["c"]) if row else 0.0
+            # Take the max: in-memory may already have this-process spend
+            # recorded that the ledger also has — max avoids double-count
+            # while never under-counting.
+            _daily_spend[key] = max(_daily_spend.get(key, 0.0), db_spend)
+        except Exception as e:  # noqa: BLE001
+            log.warning("spend seed from DB failed for %s (%s); using in-memory", provider, e)
+        _spend_seeded.add(key)
+
+
 async def _trip(provider: str, secs: int = COOLDOWN_SECONDS) -> None:
     async with _state_lock:
         _cooldowns[provider] = time.time() + secs
@@ -120,6 +165,7 @@ async def _trip(provider: str, secs: int = COOLDOWN_SECONDS) -> None:
 def _reset_state() -> None:
     _cooldowns.clear()
     _daily_spend.clear()
+    _spend_seeded.clear()
 
 
 def _state_snapshot() -> dict[str, Any]:
@@ -132,29 +178,30 @@ def _state_snapshot() -> dict[str, Any]:
 
 
 async def _post(provider: str, url: str, body: dict, headers: dict) -> dict:
-    """Single HTTP call. Trips the provider on 5xx/429 and re-raises."""
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        try:
-            r = await client.post(url, json=body, headers=headers)
-        except httpx.TransportError as e:
-            await _trip(provider)
-            raise
-        if r.status_code in (429, 500, 502, 503, 504):
-            await _trip(provider)
-            raise httpx.HTTPStatusError(
-                f"{provider} returned {r.status_code}",
-                request=r.request,
-                response=r,
-            )
-        # Diagnostic: log 4xx response BODY before raising — the body has the
-        # actual error reason (context overflow, malformed schema, etc.).
-        if r.status_code >= 400:
-            log.warning(
-                "%s %d body=%s req_size=%d",
-                provider, r.status_code, r.text[:1000], len(r.request.content or b""),
-            )
-        r.raise_for_status()
-        return r.json()
+    """Single HTTP call over the shared pooled client.
+    Trips the provider on 5xx/429 and re-raises."""
+    client = _get_http_client()
+    try:
+        r = await client.post(url, json=body, headers=headers)
+    except httpx.TransportError:
+        await _trip(provider)
+        raise
+    if r.status_code in (429, 500, 502, 503, 504):
+        await _trip(provider)
+        raise httpx.HTTPStatusError(
+            f"{provider} returned {r.status_code}",
+            request=r.request,
+            response=r,
+        )
+    # Diagnostic: log 4xx response BODY before raising — the body has the
+    # actual error reason (context overflow, malformed schema, etc.).
+    if r.status_code >= 400:
+        log.warning(
+            "%s %d body=%s req_size=%d",
+            provider, r.status_code, r.text[:1000], len(r.request.content or b""),
+        )
+    r.raise_for_status()
+    return r.json()
 
 
 def _apply_max_tokens(body: dict, tier: str) -> None:
@@ -164,12 +211,13 @@ def _apply_max_tokens(body: dict, tier: str) -> None:
 
 
 async def _call_openrouter(
-    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str
+    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str,
+    tool_choice: str = "auto",
 ) -> dict:
     body: dict[str, Any] = {"model": model, "messages": messages}
     if tools:
         body["tools"] = tools
-        body["tool_choice"] = "auto"
+        body["tool_choice"] = tool_choice
     _apply_max_tokens(body, tier)
     headers = {
         "Authorization": f"Bearer {cfg.openrouter.api_key}",
@@ -180,7 +228,8 @@ async def _call_openrouter(
 
 
 async def _call_openai(
-    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str
+    model: str, messages: list[dict], tools: list[dict] | None, cfg, tier: str,
+    tool_choice: str = "auto",
 ) -> dict:
     # OpenAI direct does not understand 'openai/' prefix or non-OpenAI models.
     if model.startswith("openai/"):
@@ -194,7 +243,7 @@ async def _call_openai(
     body: dict[str, Any] = {"model": model, "messages": messages}
     if tools:
         body["tools"] = tools
-        body["tool_choice"] = "auto"
+        body["tool_choice"] = tool_choice
     _apply_max_tokens(body, tier)
     headers = {"Authorization": f"Bearer {cfg.openai.api_key}"}
     return await _post("openai", OPENAI_URL, body, headers)
@@ -214,8 +263,13 @@ async def call(
     db,
     thread_key: str | None = None,
     job_id: str | None = None,
+    tool_choice: str = "auto",
 ) -> LLMResponse:
-    """Dispatch an LLM call through the tier router with fallback + caps + cooldowns."""
+    """Dispatch an LLM call through the tier router with fallback + caps + cooldowns.
+
+    tool_choice: "auto" (default) or "required" — the latter forces the model
+    to emit at least one tool call. Used by the intent router for command-
+    shaped messages where a text-only reply would be a fake confirmation."""
 
     # Tier -> model id resolution (from config).
     tiers = cfg.tiers.model_dump()
@@ -228,16 +282,17 @@ async def call(
         if not _cooldown_ok(provider):
             log.debug("Skip %s: cooled down for %.1fs more", provider, _cooldowns[provider] - time.time())
             continue
+        await _seed_spend_from_db(provider, db)
         if not _cap_ok(provider, cfg):
             log.warning("Skip %s: daily cap reached ($%.2f)", provider, _daily_spend.get((provider, _today()), 0))
             continue
 
         try:
             if provider == "openrouter":
-                data = await _call_openrouter(primary_model, messages, tools, cfg, tier)
+                data = await _call_openrouter(primary_model, messages, tools, cfg, tier, tool_choice=tool_choice)
                 model_used = data.get("model", primary_model)
             else:
-                data = await _call_openai(primary_model, messages, tools, cfg, tier)
+                data = await _call_openai(primary_model, messages, tools, cfg, tier, tool_choice=tool_choice)
                 model_used = data.get("model", primary_model)
         except (httpx.HTTPStatusError, httpx.TransportError) as e:
             last_err = e

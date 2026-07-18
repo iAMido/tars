@@ -122,7 +122,6 @@ SYSTEM_BLOCK = (
     "If the path is ambiguous, ASK. If the file doesn't exist and the mode "
     "is replace_section, the tool returns an error — tell the user instead "
     "of pretending success.\n"
-    "- web_research: only on the /research command.\n"
     "\n"
     "Never invent dates, citations, or follow-up closures."
 )
@@ -337,21 +336,6 @@ TOOLS: list[dict] = [
                     "section": {"type": "string", "description": "required for mode=replace_section. Matched against `## <section>` or `### <section>` (case-insensitive)."},
                 },
                 "required": ["path", "mode", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_research",
-            "description": "Bounded web research with a tool loop. Use sparingly.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "max_steps": {"type": "integer", "default": 6},
-                },
-                "required": ["query"],
             },
         },
     },

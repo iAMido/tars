@@ -5,7 +5,7 @@ Status:
   - search_memory: real (FTS5 + vec0 hybrid + Voyage rerank + alias expansion)
   - open_followup / close_followup / list_followups: real (Phase 5)
   - get_current_time: real (Phase 5 — supports relative due dates)
-  - web_research: stub (the gpt-5:online tier handles live RAG for /research)
+  - web research: no tool — the gpt-5:online tier does transport-level RAG for /research
 
 Each tool function takes (db, args_dict) and returns a JSON-serializable result
 (a string that gets fed back to the model as the tool's content).
@@ -259,7 +259,10 @@ _NOTE_BACKLINK_RE = _re.compile(r"\[\[note-(\d{1,8})\]\]")
 
 def _vault_para_md_files(cfg) -> list[_Path]:
     """Walk PARA folders under the vault root, yield .md files. Excludes
-    dotfolders, _TARS, _Templates."""
+    dotfolders, _TARS, _Templates.
+
+    NOTE: blocking filesystem walk — call via asyncio.to_thread from async
+    code so the bot's event loop never stalls on disk I/O."""
     out: list[_Path] = []
     try:
         vault = _Path(cfg.paths.vault)
@@ -275,6 +278,58 @@ def _vault_para_md_files(cfg) -> list[_Path]:
                 continue
             out.append(p)
     return out
+
+
+def _collect_promoted_note_ids_sync(cfg) -> set[int]:
+    """Read every PARA .md file and collect note ids referenced via
+    [[note-NNNNN]] backlinks. Blocking I/O — run via asyncio.to_thread."""
+    referenced: set[int] = set()
+    for p in _vault_para_md_files(cfg):
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        for m in _NOTE_BACKLINK_RE.finditer(content):
+            try:
+                referenced.add(int(m.group(1)))
+            except ValueError:
+                pass
+    return referenced
+
+
+def _scan_todos_sync(
+    files: list[_Path], vault_root: _Path,
+    paths_explicit: bool, folder_filter: str,
+    max_per: int, max_total: int,
+) -> list[dict]:
+    """Read files + extract open todos. Blocking I/O — run via to_thread."""
+    results: list[dict] = []
+    total = 0
+    for p in files:
+        try:
+            rel = str(p.resolve().relative_to(vault_root)).replace("\\", "/")
+        except ValueError:
+            continue
+        if not paths_explicit and folder_filter and not rel.startswith(folder_filter):
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        matches = _TODO_OPEN_RE.findall(content)
+        if not matches:
+            continue
+        items = [m[1].strip() for m in matches[:max_per]]
+        results.append({
+            "path": rel,
+            "open_count": len(matches),
+            "items_shown": len(items),
+            "items": items,
+        })
+        total += len(items)
+        if total >= max_total:
+            break
+    return results
 
 
 async def list_open_todos(db, args: dict[str, Any]) -> str:
@@ -308,6 +363,8 @@ async def list_open_todos(db, args: dict[str, Any]) -> str:
     vault_root = _Path(cfg.paths.vault).resolve()
 
     # File source: explicit paths beat folder filter beats full vault walk.
+    # All filesystem work runs in a thread so the event loop never blocks.
+    import asyncio as _asyncio
     files: list[_Path] = []
     if isinstance(paths_arg, list) and paths_arg:
         for raw in paths_arg:
@@ -318,34 +375,12 @@ async def list_open_todos(db, args: dict[str, Any]) -> str:
                 continue
             files.append(abs_path)
     else:
-        files = _vault_para_md_files(cfg)
+        files = await _asyncio.to_thread(_vault_para_md_files, cfg)
 
-    results: list[dict] = []
-    total = 0
-    for p in files:
-        try:
-            rel = str(p.resolve().relative_to(vault_root)).replace("\\", "/")
-        except ValueError:
-            continue
-        if not paths_arg and folder_filter and not rel.startswith(folder_filter):
-            continue
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            continue
-        matches = _TODO_OPEN_RE.findall(content)
-        if not matches:
-            continue
-        items = [m[1].strip() for m in matches[:max_per]]
-        results.append({
-            "path": rel,
-            "open_count": len(matches),
-            "items_shown": len(items),
-            "items": items,
-        })
-        total += len(items)
-        if total >= max_total:
-            break
+    results = await _asyncio.to_thread(
+        _scan_todos_sync, files, vault_root,
+        bool(paths_arg), folder_filter, max_per, max_total,
+    )
     # Most-todo files first.
     results.sort(key=lambda r: r["open_count"], reverse=True)
     grand_total = sum(r["open_count"] for r in results)
@@ -398,19 +433,9 @@ async def list_un_promoted_notes(db, args: dict[str, Any]) -> str:
     if not rows:
         return json.dumps({"total_un_promoted": 0, "notes": []})
 
-    # Build the set of note-ids referenced by PARA files.
-    files = _vault_para_md_files(cfg)
-    referenced: set[int] = set()
-    for p in files:
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            continue
-        for m in _NOTE_BACKLINK_RE.finditer(content):
-            try:
-                referenced.add(int(m.group(1)))
-            except ValueError:
-                pass
+    # Build the set of note-ids referenced by PARA files (threaded I/O).
+    import asyncio as _asyncio
+    referenced = await _asyncio.to_thread(_collect_promoted_note_ids_sync, cfg)
 
     un_promoted: list[dict] = []
     for r in rows:
@@ -531,18 +556,8 @@ async def suggest_promotions(db, args: dict[str, Any]) -> str:
     if not rows:
         return json.dumps({"suggestions": [], "total": 0})
 
-    files = _vault_para_md_files(cfg)
-    referenced: set[int] = set()
-    for p in files:
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            continue
-        for m in _NOTE_BACKLINK_RE.finditer(content):
-            try:
-                referenced.add(int(m.group(1)))
-            except ValueError:
-                pass
+    import asyncio as _asyncio
+    referenced = await _asyncio.to_thread(_collect_promoted_note_ids_sync, cfg)
 
     scored: list[dict] = []
     for r in rows:
@@ -664,10 +679,6 @@ async def get_current_time(db, args: dict[str, Any]) -> str:
             "timezone": str(tz),
         }
     )
-
-
-async def web_research(db, args: dict[str, Any]) -> str:
-    return json.dumps({"status": "not_yet_implemented", "note": "web_research lands in Phase 6+"})
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +962,6 @@ TOOL_REGISTRY = {
     "close_followup": close_followup,
     "list_followups": list_followups,
     "get_current_time": get_current_time,
-    "web_research": web_research,
     "promote_note": promote_note,
     "update_vault_file": update_vault_file,
 }

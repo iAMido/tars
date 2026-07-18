@@ -84,6 +84,16 @@ async def email_summary(agent, db, cfg) -> dict:
     now = int(t0)
     now_dt = datetime.now(ZoneInfo(cfg.timezone))
 
+    # Quiet hours: skip the Gmail fetch entirely. last_seen stays where it
+    # was, so the first non-quiet fire naturally summarizes the whole
+    # overnight backlog. Saves ~18 wasted API round-trips per night.
+    if _in_quiet_hours(now_dt):
+        log.info(
+            "email_summary: quiet hours (%02d:%02d) — skipping fetch",
+            now_dt.hour, now_dt.minute,
+        )
+        return {"new": 0, "sent": 0, "quiet_hours": True, "elapsed_s": time.time() - t0}
+
     # Read last_seen_ts; default to lookback window for first run.
     last_seen_str = await state_get(db, "email_summary.last_seen_ts")
     if last_seen_str:
@@ -97,33 +107,20 @@ async def email_summary(agent, db, cfg) -> dict:
         log.warning("email_summary: gmail fetch failed (%s); skipping this fire", e)
         return {"checked": True, "new": 0, "sent": 0, "elapsed_s": time.time() - t0}
 
-    # Bookkeep last_seen regardless of whether we send so we don't re-summarize.
-    await state_set(db, "email_summary.last_seen_ts", str(now))
-
-    # Quiet hours: ingest only, no Telegram. The next non-quiet fire will see
-    # accumulated unread since last_seen was just updated to NOW. To avoid
-    # losing the backlog: roll last_seen back if we suppress the send.
-    if _in_quiet_hours(now_dt):
-        # Restore the prior last_seen so the first non-quiet fire summarizes
-        # everything that arrived during quiet hours, not just the most recent.
-        await state_set(db, "email_summary.last_seen_ts", str(last_seen))
-        log.info(
-            "email_summary: in quiet hours (%02d:%02d) — ingested %d, not sending",
-            now_dt.hour, now_dt.minute, len(msgs),
-        )
-        return {
-            "new": len(msgs),
-            "sent": 0,
-            "quiet_hours": True,
-            "elapsed_s": time.time() - t0,
-        }
-
     if len(msgs) < MIN_NEW_THREADS:
+        # CRITICAL: do NOT advance last_seen here. Advancing on silent fires
+        # meant a slow trickle (1-2 emails per 30-min window) could NEVER
+        # accumulate to the floor — each fire reset the count. The window
+        # stays anchored at the last SENT summary so the count grows across
+        # fires until it crosses the floor.
         log.info(
-            "email_summary: %d new (< floor=%d), staying silent",
+            "email_summary: %d accumulated since last send (< floor=%d), staying silent",
             len(msgs), MIN_NEW_THREADS,
         )
         return {"new": len(msgs), "sent": 0, "elapsed_s": time.time() - t0}
+
+    # We're sending — advance the anchor.
+    await state_set(db, "email_summary.last_seen_ts", str(now))
 
     # Compose.
     payload = [

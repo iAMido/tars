@@ -132,6 +132,7 @@ class Agent:
         tier: str = "interactive_fast",
         tool_loop_max: int = TOOL_LOOP_MAX,
         auto_search: bool = True,
+        tool_choice: str = "auto",
     ) -> dict[str, Any]:
         await self._ensure_thread(thread_key)
         # Cron jobs (thread_key startswith "job:") pass enormous structured
@@ -191,7 +192,9 @@ class Agent:
             blocks.append(
                 f"[system pre-search of your memory for this query — use these "
                 f"results if relevant, ignore if not. cite [note:N] only for ids "
-                f"that appear below.]\n{presearch_block}"
+                f"that appear below. Memory search has ALREADY run for this "
+                f"query: do NOT call search_memory again unless you need a "
+                f"materially different query.]\n{presearch_block}"
             )
         if prelist_block:
             blocks.append(
@@ -206,15 +209,24 @@ class Agent:
         messages.extend(history)
         messages.append({"role": "user", "content": injected_user_text})
 
-        # Persist the ORIGINAL user_text (not the injected one) so the saved
-        # history stays clean and the cache anchor stays stable.
-        # Persist the user turn — but for cron jobs (huge prompts) save only
-        # a marker, not the full prompt. Saving the 140K-char prompt would
-        # pollute the messages table even though we skip history loading.
-        if is_job:
-            await self._save_turn(thread_key, "user", f"<job prompt {len(user_text)} chars>")
-        else:
-            await self._save_turn(thread_key, "user", user_text)
+        # The user turn is persisted only AFTER the first successful LLM
+        # response (see _persist_user_turn below). Persisting up-front meant
+        # a CircuitOpen / provider failure left orphaned user turns in
+        # history — consecutive user,user sequences that pollute context and
+        # that some providers reject outright.
+        user_turn_saved = False
+
+        async def _persist_user_turn() -> None:
+            nonlocal user_turn_saved
+            if user_turn_saved:
+                return
+            # For cron jobs (huge prompts) save only a marker, not the full
+            # prompt — the briefings table already stores the canonical output.
+            if is_job:
+                await self._save_turn(thread_key, "user", f"<job prompt {len(user_text)} chars>")
+            else:
+                await self._save_turn(thread_key, "user", user_text)
+            user_turn_saved = True
 
         # Track every note id that a tool surfaced this turn — used by the
         # citation guardrail at the end. Includes save_note returns,
@@ -234,6 +246,10 @@ class Agent:
 
         total_cost = 0.0
         for step in range(tool_loop_max):
+            # tool_choice="required" only applies to the FIRST turn — once a
+            # tool has been called, the model must be free to emit the final
+            # text reply, otherwise it loops forever calling tools.
+            step_tool_choice = tool_choice if step == 0 else "auto"
             resp: LLMResponse = await call(
                 messages=messages,
                 tools=TOOLS,
@@ -241,7 +257,9 @@ class Agent:
                 cfg=self.cfg,
                 db=self.db,
                 thread_key=thread_key,
+                tool_choice=step_tool_choice,
             )
+            await _persist_user_turn()
             total_cost += resp.cost_usd
             log.info(
                 "tier=%s model=%s prov=%s tokens=%d/%d cached=%d cost=$%.6f step=%d",
@@ -275,7 +293,10 @@ class Agent:
                     log.info("tool=%s result=%s", name, result[:200])
                     # Harvest any note ids the tool surfaced for the
                     # citation guardrail below.
-                    if name in ("save_note", "get_note", "search_memory"):
+                    if name in (
+                        "save_note", "get_note", "search_memory", "list_notes",
+                        "list_un_promoted_notes", "suggest_promotions", "delete_note",
+                    ):
                         for m in _NOTE_ID_IN_TOOL_RESULT_RE.finditer(result):
                             try:
                                 verified_note_ids.add(int(m.group(1)))

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from tars.db import Database
-from tars.memory.embed import Embedder, pack_int8
+from tars.memory.embed import Embedder, pack_float32
 from tars.memory.entities import resolve_aliases
 
 log = logging.getLogger("tars.memory.search")
@@ -74,7 +74,7 @@ async def hybrid_search(
 
     # --- 1. embed the query (original text, not expanded) ---
     qvecs = await embedder.embed([query], input_type="query")
-    qvec_bytes = pack_int8(qvecs[0])
+    qvec_bytes = pack_float32(qvecs[0])
 
     # --- 2. FTS5 BM25 candidates (use expanded text for keyword match) ---
     fts_query = _fts5_escape(expanded_text)

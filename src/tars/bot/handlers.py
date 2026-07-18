@@ -687,12 +687,35 @@ def build_dispatcher(agent: Agent, cfg: Config) -> tuple[Dispatcher, Bot]:
         except Exception as e:  # noqa: BLE001
             log.exception("triage folder reply handler failed (%s); falling through", e)
 
+        # Deterministic intent router — commands the regex can fully parse
+        # execute HERE with zero LLM (can't lie, can't cost, can't be slow).
+        from tars.bot.intent import looks_like_command, try_direct
+        try:
+            direct = await try_direct(m.text or "", agent, cfg)
+            if direct is not None:
+                await m.answer(direct.reply)
+                return
+        except Exception as e:  # noqa: BLE001
+            log.exception("intent direct-exec failed (%s); falling through to LLM", e)
+
+        # Command-shaped but not directly parseable → force the LLM to call
+        # a tool on its first turn. A text-only "Done." is impossible.
+        tool_choice = "required" if looks_like_command(m.text or "") else "auto"
+
         thread_key = f"tg:{m.chat.id}"
         try:
             out = await _with_typing(
                 bot,
                 m.chat.id,
-                agent.chat(thread_key=thread_key, user_text=m.text or "", tier="interactive_fast"),
+                agent.chat(
+                    thread_key=thread_key,
+                    user_text=m.text or "",
+                    tier="interactive_fast",
+                    tool_choice=tool_choice,
+                    # Commands act, they don't recall — skip the pre-search
+                    # embed+rerank cost for them.
+                    auto_search=(tool_choice == "auto"),
+                ),
             )
             await _send_long(bot, m.chat.id, out["text"])
             log.info(
