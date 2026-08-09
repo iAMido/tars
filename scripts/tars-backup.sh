@@ -67,6 +67,16 @@ if [ -d "$TARS_HOME/vault" ]; then
     INCLUDES+=("$TARS_HOME/vault")
 fi
 
+# CalTrack (the Telegram calorie bot, containerised alongside TARS since
+# 2026-08-10) keeps its 8 runtime secrets here and nowhere else — not in git,
+# and Railway, the previous source of truth, is being decommissioned. Without
+# this line, losing the box means re-collecting bot/API/Supabase credentials by
+# hand. The file is root:tars 0640 specifically so this service, which runs as
+# User=tars, can read it. Guarded so the backup still works if CalTrack goes.
+if [ -f /etc/caltrack/caltrack.env ]; then
+    INCLUDES+=("/etc/caltrack/caltrack.env")
+fi
+
 backup_to_repo() {
     local repo="$1" pw="$2"
     [ -z "$repo" ] && return 0
