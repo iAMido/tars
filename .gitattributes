@@ -1,0 +1,12 @@
+# Development happens on Windows; everything here runs on Linux (tars-prod).
+# Two things break when that isn't enforced:
+#   1. CRLF endings — a CRLF shebang fails with "bad interpreter: /bin/bash^M".
+#   2. The exec bit — Windows checkouts don't carry it, so `git reset --hard`
+#      in deploy.sh can strip +x from a script systemd invokes via ExecStart.
+#      That silently killed tars-backup.service from 2026-05-31 to 2026-08-10
+#      (status=203/EXEC), so the exec bits are now pinned in the index.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+*.toml      text eol=lf
+*.py        text eol=lf
